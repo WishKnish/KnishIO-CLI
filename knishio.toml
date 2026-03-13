@@ -1,0 +1,23 @@
+# KnishIO CLI Configuration
+#
+# Resolution order (highest priority wins):
+#   1. CLI flags (--url, etc.)
+#   2. Environment variables (KNISHIO_URL, etc.)
+#   3. This file (auto-discovered by walking up from CWD)
+#   4. Built-in defaults
+#
+# All values below are the defaults — uncomment and modify as needed.
+
+[validator]
+# url = "https://localhost:8080"
+# Accept self-signed TLS certificates (set to true for local dev)
+insecure_tls = true
+
+[docker]
+# compose_file = "docker-compose.standalone.yml"
+# postgres_container = "knishio-postgres"
+# validator_container = "knishio-validator"
+
+[database]
+# user = "knishio"
+# name = "knishio"
