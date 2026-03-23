@@ -21,7 +21,7 @@ clap = { version = "4.5", features = ["derive"] }
 # Async runtime
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "process"] }
 
-# HTTP client for health endpoints
+# HTTP client for health and benchmark endpoints
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # JSON serialization
@@ -40,6 +40,24 @@ toml = "0.8"
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"
+
+# Progress bars (benchmark)
+indicatif = "0.17"
+
+# KnishIO SDK for molecule signing and wallet operations (benchmark)
+knishio-client = { path = "../../sdks/KnishIO-Client-Rust" }
+
+# SQLite for benchmark fixture storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Latency plot rendering (benchmark PNG output)
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "line_series", "bitmap_encoder", "ttf"] }
+
+# Random number generation (benchmark endpoint selection)
+rand = "0.8"
+
+# Async stream utilities (benchmark concurrent execution)
+futures-util = "0.3"
 
 [profile.release]
 opt-level = 3

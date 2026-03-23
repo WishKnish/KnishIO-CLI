@@ -12,6 +12,7 @@ use crate::output;
 const SLUG_MAX_LEN: usize = 64;
 const NAME_MAX_LEN: usize = 256;
 const VALID_STATUSES: &[&str] = &["active", "paused", "archived"];
+pub const BENCH_PREFIX: &str = "BENCH_CLI_";
 
 fn validate_slug(slug: &str) -> Result<()> {
     if slug.is_empty() || slug.len() > SLUG_MAX_LEN {
@@ -131,6 +132,54 @@ pub async fn list(config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Purge all data associated with a benchmark cell, then hard-delete it.
+/// SAFETY: Only cells with the BENCH_CLI_ prefix can be purged.
+/// Atoms, bonds, and cascades auto-cascade from molecule deletion.
+/// used_positions intentionally NOT touched (OTS anti-replay is global).
+pub async fn purge(config: &Config, slug: &str) -> Result<()> {
+    validate_slug(slug)?;
+
+    // SAFETY: Refuse to purge non-benchmark cells
+    if !slug.starts_with(BENCH_PREFIX) {
+        anyhow::bail!(
+            "Refusing to purge non-benchmark cell '{}'. Only cells with '{}' prefix can be purged.",
+            slug, BENCH_PREFIX
+        );
+    }
+
+    let escaped = slug.replace('\'', "''");
+    // Disable the cascade_before_molecule_delete trigger to avoid
+    // "tuple already modified" errors during bulk cell purge.
+    // Bond migration (osmosis) is pointless when deleting the entire cell.
+    let sql = format!(
+        "BEGIN; \
+         DELETE FROM metas WHERE molecular_hash IN (SELECT molecular_hash FROM molecules WHERE cell_slug = '{escaped}'); \
+         DELETE FROM audit_events WHERE cell_slug = '{escaped}'; \
+         DELETE FROM user_activity WHERE cell_slug = '{escaped}'; \
+         DELETE FROM active_sessions WHERE cell_slug = '{escaped}'; \
+         DELETE FROM batches WHERE cell_slug = '{escaped}'; \
+         DELETE FROM osmosis_snapshots WHERE cell_slug = '{escaped}'; \
+         DELETE FROM sync_state WHERE cell_slug = '{escaped}'; \
+         DELETE FROM auth_tokens WHERE cell_slug = '{escaped}'; \
+         DELETE FROM molecular_cascades WHERE cell_slug = '{escaped}'; \
+         ALTER TABLE molecules DISABLE TRIGGER cascade_before_molecule_delete; \
+         DELETE FROM molecules WHERE cell_slug = '{escaped}'; \
+         ALTER TABLE molecules ENABLE TRIGGER cascade_before_molecule_delete; \
+         DELETE FROM cells WHERE slug = '{escaped}'; \
+         COMMIT;"
+    );
+    psql(config, &sql).await?;
+    output::success(&format!("Cell '{}' purged and deleted", slug));
+    Ok(())
+}
+
+/// List all benchmark cell slugs (BENCH_CLI_*), including archived.
+pub async fn list_bench_slugs(config: &Config) -> Result<Vec<String>> {
+    let sql = "SELECT slug FROM cells WHERE slug LIKE 'BENCH_CLI_%' ORDER BY created_at";
+    let result = psql(config, sql).await?;
+    Ok(result.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect())
 }
 
 pub async fn set_status(config: &Config, slug: &str, status: &str) -> Result<()> {

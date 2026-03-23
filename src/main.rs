@@ -208,6 +208,10 @@ enum BenchCommands {
         /// Cell slug
         #[arg(long)]
         cell_slug: Option<String>,
+
+        /// Keep benchmark data in DB after execution (default: auto-cleanup)
+        #[arg(long)]
+        keep: bool,
     },
 
     /// Generate a benchmark plan file
@@ -261,6 +265,21 @@ enum BenchCommands {
         /// Cell slug
         #[arg(long)]
         cell_slug: Option<String>,
+
+        /// Keep benchmark data in DB after execution (default: auto-cleanup)
+        #[arg(long)]
+        keep: bool,
+    },
+
+    /// Clean up benchmark data from the database
+    Clean {
+        /// Specific cell slug to purge
+        #[arg(long, conflicts_with = "all")]
+        cell_slug: Option<String>,
+
+        /// Purge ALL benchmark cells (BENCH_CLI_*)
+        #[arg(long, conflicts_with = "cell_slug")]
+        all: bool,
     },
 }
 
@@ -273,7 +292,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
 
-    // Load config: file → env vars → CLI flags
+    // Load config: file -> env vars -> CLI flags
     let cfg = config::Config::load(&cwd).with_url_override(&cli.url);
 
     match cli.command {
@@ -323,17 +342,21 @@ async fn main() -> Result<()> {
         },
 
         // ── Benchmarks ──────────────────────────────────────
-        Commands::Bench { command } => {
-            let compose = require_compose(&cwd, &cfg)?;
-            let bench_bin = paths::find_bench_binary(&compose).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "knishio-bench binary not found. Build it first:\n  \
-                     cd servers/knishio-bench && cargo build --release"
-                )
-            })?;
-
-            match command {
-                BenchCommands::Run {
+        Commands::Bench { command } => match command {
+            BenchCommands::Run {
+                identities,
+                types,
+                metas_per_identity,
+                transfers_per_identity,
+                rules_per_identity,
+                burns_per_identity,
+                token_amount,
+                endpoint,
+                concurrency,
+                cell_slug,
+                keep,
+            } => {
+                let gen_args = bench::generate::GenerateArgs {
                     identities,
                     types,
                     metas_per_identity,
@@ -341,26 +364,32 @@ async fn main() -> Result<()> {
                     rules_per_identity,
                     burns_per_identity,
                     token_amount,
-                    endpoint,
+                    output: String::new(), // filled by run()
+                };
+                let exec_args = bench::execute::ExecuteArgs {
+                    plan: String::new(), // filled by run()
+                    endpoint: Some(endpoint),
+                    endpoints: None,
+                    strategy: bench::execute::Strategy::RoundRobin,
                     concurrency,
                     cell_slug,
-                } => {
-                    bench::run(
-                        &bench_bin,
-                        identities,
-                        &types,
-                        metas_per_identity,
-                        transfers_per_identity,
-                        rules_per_identity,
-                        burns_per_identity,
-                        token_amount,
-                        &endpoint,
-                        concurrency,
-                        cell_slug.as_deref(),
-                    )
-                    .await?;
-                }
-                BenchCommands::Generate {
+                    csv: None,
+                    plot: None,
+                    insecure_tls: cfg.validator.insecure_tls,
+                };
+                bench::run(gen_args, exec_args, &cfg, keep).await?;
+            }
+            BenchCommands::Generate {
+                identities,
+                types,
+                metas_per_identity,
+                transfers_per_identity,
+                rules_per_identity,
+                burns_per_identity,
+                token_amount,
+                output: output_path,
+            } => {
+                let gen_args = bench::generate::GenerateArgs {
                     identities,
                     types,
                     metas_per_identity,
@@ -369,31 +398,34 @@ async fn main() -> Result<()> {
                     burns_per_identity,
                     token_amount,
                     output: output_path,
-                } => {
-                    bench::generate(
-                        &bench_bin,
-                        identities,
-                        &types,
-                        metas_per_identity,
-                        transfers_per_identity,
-                        rules_per_identity,
-                        burns_per_identity,
-                        token_amount,
-                        &output_path,
-                    )
-                    .await?;
-                }
-                BenchCommands::Execute {
+                };
+                bench::generate(gen_args)?;
+                output::success("Plan generation complete");
+            }
+            BenchCommands::Execute {
+                plan,
+                endpoint,
+                concurrency,
+                cell_slug,
+                keep,
+            } => {
+                let exec_args = bench::execute::ExecuteArgs {
                     plan,
-                    endpoint,
+                    endpoint: Some(endpoint),
+                    endpoints: None,
+                    strategy: bench::execute::Strategy::RoundRobin,
                     concurrency,
                     cell_slug,
-                } => {
-                    bench::execute(&bench_bin, &plan, &endpoint, concurrency, cell_slug.as_deref())
-                        .await?;
-                }
+                    csv: None,
+                    plot: None,
+                    insecure_tls: cfg.validator.insecure_tls,
+                };
+                bench::execute(exec_args, &cfg, keep).await?;
             }
-        }
+            BenchCommands::Clean { cell_slug, all } => {
+                bench::clean(&cfg, cell_slug.as_deref(), all).await?;
+            }
+        },
 
         // ── Health checks ───────────────────────────────────
         Commands::Health => {
