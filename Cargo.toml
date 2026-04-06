@@ -1,6 +1,6 @@
 [package]
 name = "knishio-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "KnishIO validator orchestration CLI — Docker control, cell management, benchmarks, and health checks"
 license = "GPL-3.0-or-later"
@@ -45,7 +45,7 @@ thiserror = "2.0"
 indicatif = "0.17"
 
 # KnishIO SDK for molecule signing and wallet operations (benchmark)
-knishio-client = { path = "../../sdks/KnishIO-Client-Rust" }
+knishio-client = "0.1.2"
 
 # SQLite for benchmark fixture storage
 rusqlite = { version = "0.31", features = ["bundled"] }
