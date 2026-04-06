@@ -23,6 +23,15 @@
 //! knishio bench generate --types meta -o plan.db
 //! knishio bench execute plan.db --concurrency 10
 //!
+//! # Embedding management
+//! knishio embed status
+//! knishio embed reset
+//! knishio embed reset --model qwen3-embedding-0.6b -y
+//! knishio embed search "user profile settings"
+//! knishio embed search "token metadata" --limit 20 --threshold 0.8
+//! knishio embed ask "what stores sell kitchen stuff?"
+//! knishio embed ask "who has the most tokens?" --max-results 30
+//!
 //! # Health checks
 //! knishio health
 //! knishio ready
@@ -34,6 +43,7 @@ mod bench;
 mod cell;
 mod config;
 mod docker;
+mod embed;
 mod health;
 mod output;
 mod paths;
@@ -112,6 +122,12 @@ enum Commands {
     Bench {
         #[command(subcommand)]
         command: BenchCommands,
+    },
+
+    /// Embedding management (DataBraid VKG)
+    Embed {
+        #[command(subcommand)]
+        command: EmbedCommands,
     },
 
     /// Quick health check (GET /healthz)
@@ -283,6 +299,63 @@ enum BenchCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum EmbedCommands {
+    /// Show embedding coverage and model statistics
+    Status,
+
+    /// Clear embeddings so the automatic backfill re-embeds them
+    Reset {
+        /// Clear only embeddings from this specific model name
+        #[arg(long, conflicts_with = "all")]
+        model: Option<String>,
+
+        /// Clear ALL embeddings (nuclear option)
+        #[arg(long, conflicts_with = "model")]
+        all: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Run semantic search from the terminal
+    Search {
+        /// Natural language search query
+        query: String,
+
+        /// Maximum number of results
+        #[arg(long, default_value_t = 10)]
+        limit: i32,
+
+        /// Minimum cosine similarity threshold (0.0 to 1.0)
+        #[arg(long, default_value_t = 0.7)]
+        threshold: f64,
+
+        /// Filter by meta_type
+        #[arg(long)]
+        meta_type: Option<String>,
+    },
+
+    /// Ask a natural language question about DAG data (RAG)
+    Ask {
+        /// Question to ask
+        question: String,
+
+        /// Maximum source records to consider
+        #[arg(long, default_value_t = 20)]
+        max_results: i32,
+
+        /// Minimum cosine similarity threshold (0.0 to 1.0)
+        #[arg(long, default_value_t = 0.5)]
+        threshold: f64,
+
+        /// Filter by meta_type
+        #[arg(long)]
+        meta_type: Option<String>,
+    },
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════
@@ -424,6 +497,32 @@ async fn main() -> Result<()> {
             }
             BenchCommands::Clean { cell_slug, all } => {
                 bench::clean(&cfg, cell_slug.as_deref(), all).await?;
+            }
+        },
+
+        // ── Embedding management ────────────────────────────
+        Commands::Embed { command } => match command {
+            EmbedCommands::Status => {
+                embed::status(&cfg).await?;
+            }
+            EmbedCommands::Reset { model, all, yes } => {
+                embed::reset(&cfg, model.as_deref(), all, yes).await?;
+            }
+            EmbedCommands::Search {
+                query,
+                limit,
+                threshold,
+                meta_type,
+            } => {
+                embed::search(&cfg, &query, limit, threshold, meta_type.as_deref()).await?;
+            }
+            EmbedCommands::Ask {
+                question,
+                max_results,
+                threshold,
+                meta_type,
+            } => {
+                embed::ask(&cfg, &question, max_results, threshold, meta_type.as_deref()).await?;
             }
         },
 
