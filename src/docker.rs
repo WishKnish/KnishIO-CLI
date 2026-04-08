@@ -1,18 +1,30 @@
-//! Docker Compose control — start, stop, destroy, rebuild, logs, status.
+//! Docker Compose control — start, stop, destroy, rebuild, logs, status, psql.
 
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 
+use crate::config::Config;
 use crate::output;
 
 /// Run `docker compose -f <file> <args...>`, inheriting stdout/stderr.
+///
+/// Automatically detects and loads `.env.production` if the compose file
+/// is `docker-compose.production.yml`, otherwise uses Docker's default `.env`.
 async fn compose(compose_file: &Path, args: &[&str]) -> Result<bool> {
-    let status = Command::new("docker")
-        .arg("compose")
-        .arg("-f")
-        .arg(compose_file)
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose").arg("-f").arg(compose_file);
+
+    // Auto-detect env file based on compose filename
+    if let Some(dir) = compose_file.parent() {
+        let env_production = dir.join(".env.production");
+        if env_production.exists() && compose_file.to_string_lossy().contains("production") {
+            cmd.arg("--env-file").arg(&env_production);
+        }
+    }
+
+    let status = cmd
         .args(args)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -95,5 +107,40 @@ pub async fn logs(compose_file: &Path, follow: bool, tail: Option<usize>) -> Res
 
 pub async fn status(compose_file: &Path) -> Result<()> {
     compose(compose_file, &["ps"]).await?;
+    Ok(())
+}
+
+/// Open an interactive psql session or run a single SQL command.
+pub async fn psql(cfg: &Config, sql_command: Option<&str>) -> Result<()> {
+    let container = &cfg.docker.postgres_container;
+    let db_user = &cfg.database.user;
+    let db_name = &cfg.database.name;
+
+    let mut args = vec!["exec"];
+
+    if sql_command.is_none() {
+        // Interactive mode needs -it
+        args.push("-it");
+    }
+
+    args.extend_from_slice(&[container.as_str(), "psql", "-U", db_user, "-d", db_name]);
+
+    if let Some(cmd) = sql_command {
+        args.push("-c");
+        args.push(cmd);
+    }
+
+    let status = Command::new("docker")
+        .args(&args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .context("Failed to run psql — is the postgres container running?")?;
+
+    if !status.success() {
+        output::error("psql session ended with error");
+    }
     Ok(())
 }

@@ -3,6 +3,9 @@
 //! ## Usage
 //!
 //! ```bash
+//! # First-time production setup
+//! knishio init --tls
+//!
 //! # Docker control
 //! knishio start --build -d
 //! knishio stop
@@ -17,6 +20,19 @@
 //! knishio cell activate TESTCELL
 //! knishio cell pause TESTCELL
 //! knishio cell archive TESTCELL
+//!
+//! # Database management
+//! knishio backup
+//! knishio backup --output mybackup.sql
+//! knishio backup list
+//! knishio restore backups/knishio_20260406.sql
+//! knishio psql
+//! knishio psql -c "SELECT count(*) FROM molecules"
+//!
+//! # Updates
+//! knishio update
+//! knishio update --build
+//! knishio update --rollback
 //!
 //! # Benchmarks
 //! knishio bench run --types meta,value-transfer --identities 50 --concurrency 5
@@ -39,14 +55,17 @@
 //! knishio db
 //! ```
 
+mod backup;
 mod bench;
 mod cell;
 mod config;
 mod docker;
 mod embed;
 mod health;
+mod init;
 mod output;
 mod paths;
+mod update;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -74,6 +93,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize production deployment (generates secrets, config, certs)
+    Init {
+        /// Generate self-signed TLS certificates
+        #[arg(long)]
+        tls: bool,
+
+        /// Set CORS_ORIGINS in generated config
+        #[arg(long)]
+        cors: Option<String>,
+    },
+
     /// Start the validator stack (docker compose up)
     Start {
         /// Build images before starting
@@ -98,6 +128,17 @@ enum Commands {
     /// Rebuild validator image from scratch and restart
     Rebuild,
 
+    /// Pull/build latest version, restart, and verify health
+    Update {
+        /// Build from source instead of pulling images
+        #[arg(long)]
+        build: bool,
+
+        /// Roll back to previous version
+        #[arg(long, conflicts_with = "build")]
+        rollback: bool,
+    },
+
     /// Show container logs
     Logs {
         /// Follow log output
@@ -116,6 +157,29 @@ enum Commands {
     Cell {
         #[command(subcommand)]
         command: CellCommands,
+    },
+
+    /// Database backup and restore
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommands,
+    },
+
+    /// Restore database from a backup file
+    Restore {
+        /// Path to the backup file
+        path: String,
+
+        /// Skip post-restore verification
+        #[arg(long)]
+        skip_verify: bool,
+    },
+
+    /// Open an interactive psql session
+    Psql {
+        /// Run a single SQL command instead of interactive mode
+        #[arg(short, long)]
+        command: Option<String>,
     },
 
     /// Benchmark operations
@@ -141,6 +205,19 @@ enum Commands {
 
     /// Database consistency check (GET /db-check)
     Db,
+}
+
+#[derive(Subcommand)]
+enum BackupCommands {
+    /// Create a database backup (default)
+    Create {
+        /// Output file path (default: backups/knishio_TIMESTAMP.sql)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// List available backups
+    List,
 }
 
 #[derive(Subcommand)]
@@ -369,6 +446,11 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load(&cwd).with_url_override(&cli.url);
 
     match cli.command {
+        // ── Init ────────────────────────────────────────────
+        Commands::Init { tls, cors } => {
+            init::run(&cwd, tls, cors.as_deref()).await?;
+        }
+
         // ── Docker control ──────────────────────────────────
         Commands::Start { build, detach } => {
             let compose = require_compose(&cwd, &cfg)?;
@@ -385,6 +467,14 @@ async fn main() -> Result<()> {
         Commands::Rebuild => {
             let compose = require_compose(&cwd, &cfg)?;
             docker::rebuild(&compose).await?;
+        }
+        Commands::Update { build, rollback } => {
+            let compose = require_compose(&cwd, &cfg)?;
+            if rollback {
+                update::rollback(&compose, &cfg).await?;
+            } else {
+                update::update(&compose, &cfg, build).await?;
+            }
         }
         Commands::Logs { follow, tail } => {
             let compose = require_compose(&cwd, &cfg)?;
@@ -413,6 +503,24 @@ async fn main() -> Result<()> {
                 cell::set_status(&cfg, &slug, "archived").await?;
             }
         },
+
+        // ── Backup / Restore ────────────────────────────────
+        Commands::Backup { command } => match command {
+            BackupCommands::Create { output } => {
+                backup::backup(&cfg, output.as_deref()).await?;
+            }
+            BackupCommands::List => {
+                backup::list().await?;
+            }
+        },
+        Commands::Restore { path, skip_verify } => {
+            backup::restore(&cfg, &path, skip_verify).await?;
+        }
+
+        // ── Psql ────────────────────────────────────────────
+        Commands::Psql { command } => {
+            docker::psql(&cfg, command.as_deref()).await?;
+        }
 
         // ── Benchmarks ──────────────────────────────────────
         Commands::Bench { command } => match command {
