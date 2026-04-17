@@ -56,6 +56,9 @@
 //! knishio embed search "user profile settings"
 //! knishio embed ask "what stores sell kitchen stuff?"
 //!
+//! # Validator AI introspection
+//! knishio ai status                    # fetch /ai/status and pretty-print
+//!
 //! # Health checks
 //! knishio health
 //! knishio ready
@@ -63,6 +66,7 @@
 //! knishio db
 //! ```
 
+mod ai;
 mod backup;
 mod bench;
 mod cell;
@@ -193,6 +197,12 @@ enum Commands {
         command: DmrCommands,
     },
 
+    /// Validator AI-pipeline introspection (via /ai/status)
+    Ai {
+        #[command(subcommand)]
+        command: AiCommands,
+    },
+
     /// Cell management
     Cell {
         #[command(subcommand)]
@@ -259,6 +269,12 @@ enum DmrCommands {
         #[arg(long)]
         model: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum AiCommands {
+    /// Fetch `/ai/status` from the validator and pretty-print
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -553,6 +569,11 @@ async fn main() -> Result<()> {
             let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
             docker::status(&files).await?;
         }
+
+        // ── Validator AI introspection ──────────────────────
+        Commands::Ai { command } => match command {
+            AiCommands::Status => ai::status(&cfg).await?,
+        },
 
         // ── Docker Model Runner ─────────────────────────────
         Commands::Dmr { command } => match command {
