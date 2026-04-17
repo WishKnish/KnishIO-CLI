@@ -6,13 +6,24 @@
 //! # First-time production setup
 //! knishio init --tls
 //!
-//! # Docker control
+//! # Environment probe (no side effects)
+//! knishio detect
+//!
+//! # Docker control (auto-detects accel profile by default)
 //! knishio start --build -d
+//! knishio start --accel cuda -d       # force NVIDIA path
+//! knishio start --accel cpu -d        # force portable CPU path
 //! knishio stop
 //! knishio destroy --volumes
 //! knishio rebuild
 //! knishio logs --follow --tail 100
 //! knishio status
+//!
+//! # Docker Model Runner (macOS GPU bridge)
+//! knishio dmr status
+//! knishio dmr enable
+//! knishio dmr pull                     # fetches default Qwen GGUFs
+//! knishio dmr pull --model hf.co/...   # arbitrary ref
 //!
 //! # Cell management
 //! knishio cell create TESTCELL --name "Test Cell"
@@ -42,11 +53,8 @@
 //! # Embedding management
 //! knishio embed status
 //! knishio embed reset
-//! knishio embed reset --model qwen3-embedding-0.6b -y
 //! knishio embed search "user profile settings"
-//! knishio embed search "token metadata" --limit 20 --threshold 0.8
 //! knishio embed ask "what stores sell kitchen stuff?"
-//! knishio embed ask "who has the most tokens?" --max-results 30
 //!
 //! # Health checks
 //! knishio health
@@ -59,6 +67,8 @@ mod backup;
 mod bench;
 mod cell;
 mod config;
+mod detect;
+mod dmr;
 mod docker;
 mod embed;
 mod health;
@@ -68,8 +78,11 @@ mod paths;
 mod update;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::env;
+use std::path::PathBuf;
+
+use crate::detect::Accel;
 
 // ═══════════════════════════════════════════════════════════════
 // CLI Definitions
@@ -87,12 +100,33 @@ struct Cli {
     #[arg(long, global = true, default_value = "https://localhost:8080")]
     url: String,
 
+    /// Hardware acceleration profile. `auto` auto-detects the host
+    /// (Apple Silicon → DMR or metal-native, NVIDIA → cuda, otherwise cpu).
+    /// Override to force a specific stack.
+    #[arg(long, global = true, value_enum, default_value_t = AccelFlag::Auto)]
+    accel: AccelFlag,
+
     #[command(subcommand)]
     command: Commands,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "kebab-case")]
+enum AccelFlag {
+    Auto,
+    Cpu,
+    Cuda,
+    Dmr,
+    MetalNative,
+    Rocm,
+    Vulkan,
+}
+
 #[derive(Subcommand)]
 enum Commands {
+    /// Print environment detection result; no side effects
+    Detect,
+
     /// Initialize production deployment (generates secrets, config, certs)
     Init {
         /// Generate self-signed TLS certificates
@@ -153,6 +187,12 @@ enum Commands {
     /// Show container status
     Status,
 
+    /// Docker Model Runner (macOS GPU bridge) control
+    Dmr {
+        #[command(subcommand)]
+        command: DmrCommands,
+    },
+
     /// Cell management
     Cell {
         #[command(subcommand)]
@@ -205,6 +245,20 @@ enum Commands {
 
     /// Database consistency check (GET /db-check)
     Db,
+}
+
+#[derive(Subcommand)]
+enum DmrCommands {
+    /// Show client/server/TCP status and cached model list
+    Status,
+    /// Enable DMR's TCP endpoint on :12434 (wrapper over `docker desktop enable`)
+    Enable,
+    /// Pull a model into the DMR cache (defaults to the two Qwen GGUFs)
+    Pull {
+        /// Model ref: `hf.co/<owner>/<repo>`, `ai/<name>`, or full OCI ref
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -446,44 +500,66 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load(&cwd).with_url_override(&cli.url);
 
     match cli.command {
+        // ── Detect (no docker dispatch) ─────────────────────
+        Commands::Detect => {
+            let env = detect::detect();
+            detect::print_summary(&env);
+        }
+
         // ── Init ────────────────────────────────────────────
         Commands::Init { tls, cors } => {
             init::run(&cwd, tls, cors.as_deref()).await?;
         }
 
-        // ── Docker control ──────────────────────────────────
+        // ── Docker control (all accel-aware) ────────────────
         Commands::Start { build, detach } => {
-            let compose = require_compose(&cwd, &cfg)?;
-            docker::start(&compose, build, detach).await?;
+            let (accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            docker::start(&files, build, detach).await?;
+            if cfg.accel_is_native(accel) {
+                docker::print_metal_native_hint(&cwd, &cfg);
+            }
         }
         Commands::Stop => {
-            let compose = require_compose(&cwd, &cfg)?;
-            docker::stop(&compose).await?;
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            docker::stop(&files).await?;
         }
         Commands::Destroy { volumes } => {
-            let compose = require_compose(&cwd, &cfg)?;
-            docker::destroy(&compose, volumes).await?;
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            docker::destroy(&files, volumes).await?;
         }
         Commands::Rebuild => {
-            let compose = require_compose(&cwd, &cfg)?;
-            docker::rebuild(&compose).await?;
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            docker::rebuild(&files).await?;
         }
         Commands::Update { build, rollback } => {
-            let compose = require_compose(&cwd, &cfg)?;
+            // update module still takes a single compose file; reuse the first
+            // (base) file in the resolved chain so back-compat is preserved.
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            let base = files
+                .first()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("resolved accel chain is empty"))?;
             if rollback {
-                update::rollback(&compose, &cfg).await?;
+                update::rollback(&base, &cfg).await?;
             } else {
-                update::update(&compose, &cfg, build).await?;
+                update::update(&base, &cfg, build).await?;
             }
         }
         Commands::Logs { follow, tail } => {
-            let compose = require_compose(&cwd, &cfg)?;
-            docker::logs(&compose, follow, tail).await?;
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            docker::logs(&files, follow, tail).await?;
         }
         Commands::Status => {
-            let compose = require_compose(&cwd, &cfg)?;
-            docker::status(&compose).await?;
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            docker::status(&files).await?;
         }
+
+        // ── Docker Model Runner ─────────────────────────────
+        Commands::Dmr { command } => match command {
+            DmrCommands::Status => dmr::status().await?,
+            DmrCommands::Enable => dmr::enable().await?,
+            DmrCommands::Pull { model } => dmr::pull(model).await?,
+        },
 
         // ── Cell management ─────────────────────────────────
         Commands::Cell { command } => match command {
@@ -652,14 +728,143 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Resolve the docker-compose file or exit with a helpful error.
-/// Uses the compose_file name from config for discovery.
-fn require_compose(cwd: &std::path::Path, cfg: &config::Config) -> Result<std::path::PathBuf> {
-    paths::find_compose_file(cwd, &cfg.docker.compose_file).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Could not find {}.\n\
-             Run this command from inside the KnishIO project tree.",
-            cfg.docker.compose_file
-        )
-    })
+// ═══════════════════════════════════════════════════════════════
+// Accel resolution
+// ═══════════════════════════════════════════════════════════════
+
+/// Turn a CLI `--accel` flag + config + host detection into a concrete
+/// (Accel, compose file list) pair. Prints the Environment header and the
+/// "Stack" line every time, so the operator always sees what's happening.
+///
+/// Precedence:
+///   1. Explicit `--accel` flag (not Auto)
+///   2. `knishio.toml` `default_accel` or env `KNISHIO_ACCEL` (plumbed via cfg.default_accel)
+///   3. Auto-detection via `detect::detect()`
+fn resolve_accel_and_files(
+    cwd: &std::path::Path,
+    cfg: &config::Config,
+    cli_accel: AccelFlag,
+) -> Result<(Accel, Vec<PathBuf>)> {
+    let (accel, source) = match cli_accel {
+        AccelFlag::Auto => match cfg.default_accel.as_deref() {
+            Some(name) => {
+                let a = parse_accel_name(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "config `default_accel = \"{}\"` is not a known accel name",
+                        name
+                    )
+                })?;
+                (a, AccelSource::Config)
+            }
+            None => {
+                let env = detect::detect();
+                detect::print_summary(&env);
+                (env.accel, AccelSource::Auto)
+            }
+        },
+        explicit => (flag_to_accel(explicit), AccelSource::Explicit),
+    };
+
+    // Print the override / config origin line when we didn't already print a
+    // full Environment block above.
+    let arrow = colored::Colorize::bold(colored::Colorize::green("→"));
+    match source {
+        AccelSource::Auto => {
+            // print_summary already printed the Accel line; just add Stack below.
+        }
+        AccelSource::Explicit => {
+            output::header("Environment");
+            println!(
+                "{} Accel:   {}  (explicit --accel; detection skipped)",
+                arrow,
+                accel
+            );
+        }
+        AccelSource::Config => {
+            output::header("Environment");
+            println!(
+                "{} Accel:   {}  (config default_accel; detection skipped)",
+                arrow,
+                accel
+            );
+        }
+    }
+
+    // Resolve overlay chain, with CPU fallback when the chosen profile's
+    // files aren't present on disk.
+    let configured = cfg.accel_files(accel).to_vec();
+    if configured.is_empty() {
+        output::warn(&format!(
+            "accel `{}` has no configured compose files; falling back to cpu",
+            accel
+        ));
+        let cpu_files = cfg.accel_files(Accel::Cpu).to_vec();
+        let resolved = paths::find_compose_files(cwd, &cpu_files)?;
+        print_stack_line(&cpu_files);
+        return Ok((Accel::Cpu, resolved));
+    }
+
+    match paths::find_compose_files(cwd, &configured) {
+        Ok(resolved) => {
+            print_stack_line(&configured);
+            if accel == Accel::Dmr {
+                println!(
+                    "{} {:8} validator → model-runner.docker.internal:12434/engines/llama.cpp/v1",
+                    arrow, "Routing:"
+                );
+            }
+            Ok((accel, resolved))
+        }
+        Err(e) => {
+            output::warn(&format!("{}", e));
+            output::warn(&format!(
+                "falling back from `{}` to `cpu`",
+                accel
+            ));
+            let cpu_files = cfg.accel_files(Accel::Cpu).to_vec();
+            let resolved = paths::find_compose_files(cwd, &cpu_files)?;
+            print_stack_line(&cpu_files);
+            Ok((Accel::Cpu, resolved))
+        }
+    }
+}
+
+fn print_stack_line(files: &[String]) {
+    let arrow = colored::Colorize::bold(colored::Colorize::green("→"));
+    println!(
+        "{} {:8} {}",
+        arrow,
+        "Stack:",
+        files.join(" + ")
+    );
+}
+
+enum AccelSource {
+    Auto,
+    Explicit,
+    Config,
+}
+
+fn flag_to_accel(f: AccelFlag) -> Accel {
+    match f {
+        AccelFlag::Auto => unreachable!("Auto handled by caller"),
+        AccelFlag::Cpu => Accel::Cpu,
+        AccelFlag::Cuda => Accel::Cuda,
+        AccelFlag::Dmr => Accel::Dmr,
+        AccelFlag::MetalNative => Accel::MetalNative,
+        AccelFlag::Rocm => Accel::Rocm,
+        AccelFlag::Vulkan => Accel::Vulkan,
+    }
+}
+
+fn parse_accel_name(name: &str) -> Option<Accel> {
+    match name {
+        "cpu" => Some(Accel::Cpu),
+        "cuda" => Some(Accel::Cuda),
+        "dmr" => Some(Accel::Dmr),
+        "metal-native" => Some(Accel::MetalNative),
+        "rocm" => Some(Accel::Rocm),
+        "vulkan" => Some(Accel::Vulkan),
+        _ => None,
+    }
 }

@@ -3,8 +3,10 @@
 
 use anyhow::Result;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
+use crate::detect::Accel;
 use crate::output;
 
 const CONFIG_FILENAME: &str = "knishio.toml";
@@ -15,6 +17,9 @@ pub struct Config {
     pub validator: ValidatorConfig,
     pub docker: DockerConfig,
     pub database: DatabaseConfig,
+    /// Optional: force this accel, skipping auto-detection. Mostly for CI /
+    /// reproducible rigs.  Accepts the same names as the CLI `--accel` flag.
+    pub default_accel: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -27,9 +32,25 @@ pub struct ValidatorConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DockerConfig {
+    /// Back-compat single file. Ignored when `accel` is driving file
+    /// selection (i.e. all new code paths).
     pub compose_file: String,
     pub postgres_container: String,
     pub validator_container: String,
+    /// Per-accel overlay chains. Keys match `Accel::config_key()`.
+    /// Empty/missing keys fall back to baked defaults (see `default_accel_map`).
+    pub accel: HashMap<String, AccelProfile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AccelProfile {
+    /// Compose filenames (in layering order) for `docker compose -f a -f b …`.
+    pub files: Vec<String>,
+    /// When true, the validator runs natively on the host rather than in a
+    /// container. `start` still brings up whatever's in `files` (typically
+    /// just Postgres) and then emits a native-run hint block.
+    pub native_validator: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +68,7 @@ impl Default for Config {
             validator: ValidatorConfig::default(),
             docker: DockerConfig::default(),
             database: DatabaseConfig::default(),
+            default_accel: None,
         }
     }
 }
@@ -66,6 +88,16 @@ impl Default for DockerConfig {
             compose_file: "docker-compose.standalone.yml".into(),
             postgres_container: "knishio-postgres".into(),
             validator_container: "knishio-validator".into(),
+            accel: default_accel_map(),
+        }
+    }
+}
+
+impl Default for AccelProfile {
+    fn default() -> Self {
+        Self {
+            files: Vec::new(),
+            native_validator: false,
         }
     }
 }
@@ -77,6 +109,67 @@ impl Default for DatabaseConfig {
             name: "knishio".into(),
         }
     }
+}
+
+/// Baked-in defaults for every accel profile. Written out verbatim in
+/// `knishio.toml`'s template so operators can see + override them.
+fn default_accel_map() -> HashMap<String, AccelProfile> {
+    let mut m = HashMap::new();
+    m.insert(
+        "cpu".into(),
+        AccelProfile {
+            files: vec!["docker-compose.standalone.yml".into()],
+            native_validator: false,
+        },
+    );
+    m.insert(
+        "cuda".into(),
+        AccelProfile {
+            files: vec![
+                "docker-compose.standalone.yml".into(),
+                "docker-compose.cuda.yml".into(),
+            ],
+            native_validator: false,
+        },
+    );
+    m.insert(
+        "dmr".into(),
+        AccelProfile {
+            files: vec![
+                "docker-compose.standalone.yml".into(),
+                "docker-compose.dmr.yml".into(),
+            ],
+            native_validator: false,
+        },
+    );
+    m.insert(
+        "metal-native".into(),
+        AccelProfile {
+            files: vec!["docker-compose.metal.yml".into()],
+            native_validator: true,
+        },
+    );
+    m.insert(
+        "rocm".into(),
+        AccelProfile {
+            files: vec![
+                "docker-compose.standalone.yml".into(),
+                "docker-compose.rocm.yml".into(),
+            ],
+            native_validator: false,
+        },
+    );
+    m.insert(
+        "vulkan".into(),
+        AccelProfile {
+            files: vec![
+                "docker-compose.standalone.yml".into(),
+                "docker-compose.vulkan.yml".into(),
+            ],
+            native_validator: false,
+        },
+    );
+    m
 }
 
 // ── Loading ─────────────────────────────────────────────────
@@ -97,6 +190,12 @@ impl Config {
             },
             None => Config::default(),
         };
+
+        // Ensure baked defaults are present for any accel profile the config
+        // file didn't override explicitly.
+        for (k, v) in default_accel_map() {
+            config.docker.accel.entry(k).or_insert(v);
+        }
 
         config.apply_env_overrides();
         config
@@ -128,6 +227,9 @@ impl Config {
             self.validator.insecure_tls =
                 val.eq_ignore_ascii_case("true") || val == "1";
         }
+        if let Ok(val) = std::env::var("KNISHIO_ACCEL") {
+            self.default_accel = Some(val);
+        }
     }
 
     /// Apply CLI flag override for the validator URL.
@@ -141,6 +243,25 @@ impl Config {
             self.validator.url = cli_url.to_string();
         }
         self
+    }
+
+    /// Look up the overlay file list for the given accel, falling back to CPU
+    /// (with a warning emitted by the caller) if the profile has no `files`.
+    pub fn accel_files(&self, accel: Accel) -> &[String] {
+        self.docker
+            .accel
+            .get(accel.config_key())
+            .map(|p| p.files.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Whether this accel wants the validator to run natively on the host.
+    pub fn accel_is_native(&self, accel: Accel) -> bool {
+        self.docker
+            .accel
+            .get(accel.config_key())
+            .map(|p| p.native_validator)
+            .unwrap_or(false)
     }
 }
 

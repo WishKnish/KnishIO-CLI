@@ -11,7 +11,11 @@ Unified CLI for orchestrating the KnishIO validator stack — production deploym
 # Install the CLI
 cargo install knishio-cli
 
-# Start the validator stack
+# See what the CLI detected about your host (zero side effects)
+knishio detect
+
+# Start the validator stack — accel profile is auto-detected
+# (NVIDIA host → cuda, Apple Silicon + DMR → dmr, otherwise → cpu)
 knishio start -d --build
 
 # Create a cell and check health
@@ -24,6 +28,8 @@ knishio bench run --types meta --identities 50 --cell-slug TESTCELL
 # Tear it all down
 knishio destroy --volumes
 ```
+
+Every docker-touching command prints an **Environment** block so you always see exactly what was detected and which compose stack is running. Override auto-detection with `--accel <name>` — see [Hardware Acceleration](#hardware-acceleration).
 
 ### Production Quick Start
 
@@ -87,6 +93,9 @@ The CLI uses a layered configuration system. Values are resolved in this order (
 Place a `knishio.toml` anywhere in the project tree — the CLI walks up from your current directory to find it.
 
 ```toml
+# Optional: pin an accel and skip auto-detection every invocation
+# default_accel = "cpu"
+
 [validator]
 url = "https://localhost:8080"
 insecure_tls = false  # set to true for self-signed certs
@@ -95,6 +104,17 @@ insecure_tls = false  # set to true for self-signed certs
 compose_file = "docker-compose.standalone.yml"
 postgres_container = "knishio-postgres"
 validator_container = "knishio-validator"
+
+# Per-accel compose file chains (all of these have baked defaults — override here only)
+# [docker.accel.cuda]
+# files = ["docker-compose.standalone.yml", "docker-compose.cuda.yml"]
+#
+# [docker.accel.dmr]
+# files = ["docker-compose.standalone.yml", "docker-compose.dmr.yml"]
+#
+# [docker.accel.metal-native]
+# files = ["docker-compose.metal.yml"]
+# native_validator = true   # emits the cargo-run hint after `start`
 
 [database]
 user = "knishio"
@@ -113,16 +133,124 @@ For production, `knishio init` generates a `knishio.toml` that points to `docker
 | `KNISHIO_DB_USER` | `database.user` | `knishio` |
 | `KNISHIO_DB_NAME` | `database.name` | `knishio` |
 | `KNISHIO_INSECURE_TLS` | `validator.insecure_tls` | `false` |
+| `KNISHIO_ACCEL` | `default_accel` | *(unset → auto-detect)* |
 
 ### Global CLI Flags
 
 ```
---url <URL>    Validator base URL for health commands [default: https://localhost:8080]
--h, --help     Print help
--V, --version  Print version
+--url <URL>       Validator base URL for health commands [default: https://localhost:8080]
+--accel <ACCEL>   Hardware acceleration profile
+                  [default: auto]
+                  [possible values: auto, cpu, cuda, dmr, metal-native, rocm, vulkan]
+-h, --help        Print help
+-V, --version     Print version
 ```
 
-The `--url` flag applies to `health`, `ready`, `full`, and `db` commands. TLS certificates are validated by default. To accept self-signed certificates (e.g., local dev), set `insecure_tls = true` in `knishio.toml` or `KNISHIO_INSECURE_TLS=true`. All health requests have a 30-second timeout.
+`--url` applies to `health`, `ready`, `full`, and `db`. TLS certificates are validated by default; set `insecure_tls = true` in `knishio.toml` or `KNISHIO_INSECURE_TLS=true` for self-signed local certs. Health requests have a 30-second timeout.
+
+`--accel auto` (default) auto-detects the host; any other value forces a specific stack and skips detection. See [Hardware Acceleration](#hardware-acceleration) for the full decision table.
+
+## Hardware Acceleration
+
+The CLI auto-detects the host and picks the matching compose stack + env vars so GPU-accelerated inference works without typing the right `-f a.yml -f b.yml` incantations yourself. Every `knishio start / rebuild / stop / status / …` prints the resolved accel, the compose stack being used, and (for DMR) the host-side routing URL — so the active optimization is never a guess.
+
+### Decision Table
+
+| Host signal | → Accel | Compose stack | Validator runs where |
+|---|---|---|---|
+| macOS + Apple Silicon + DMR TCP reachable on `:12434` | **dmr** | `standalone.yml` + `dmr.yml` | containerised; inference to host DMR |
+| macOS + Apple Silicon (DMR missing) | **metal-native** | `metal.yml` *(Postgres only)* + cargo-run hint | host (native `--features metal`) |
+| Linux with `nvidia-smi` present | **cuda** | `standalone.yml` + `cuda.yml` | containerised (GPU passthrough via nvidia-container-toolkit) |
+| Linux with `rocminfo` present | **rocm** | `standalone.yml` + `rocm.yml` *(overlay TBD)* | containerised |
+| everything else | **cpu** | `standalone.yml` | containerised, CPU-only |
+
+If the chosen accel's overlay file isn't present on disk, the CLI falls back to `cpu` with a warning line — you're never blocked because an overlay didn't ship.
+
+### detect
+
+Probe the host and print the resolved accel — no side effects.
+
+```bash
+knishio detect
+```
+
+Example output on an M4 Mac with DMR enabled:
+
+```
+Environment
+ℹ Host:    macos (aarch64)
+ℹ CPU:     Apple M4 · 32 GB RAM
+ℹ GPU:     Apple M4 (Apple)
+ℹ Docker:  29.3.1
+ℹ DMR:     running, TCP :12434 reachable, 2 cached model(s)
+→ Accel:   dmr  (Apple Silicon + DMR TCP reachable)
+```
+
+### Forcing a profile
+
+Override auto-detection with `--accel <name>`. The flag is global — works on every docker-touching subcommand.
+
+```bash
+knishio start --accel cpu -d          # portable CPU, regardless of host
+knishio start --accel cuda --build -d # force NVIDIA path
+knishio start --accel dmr -d          # force DMR bridge on Mac
+knishio status --accel metal-native   # see what the native-Metal stack would look like
+```
+
+For CI determinism, pin a profile in `knishio.toml` instead:
+
+```toml
+default_accel = "cpu"
+```
+
+Or via env var: `KNISHIO_ACCEL=cpu`.
+
+### Apple Silicon via Docker Model Runner
+
+On macOS, Linux containers cannot access the Metal GPU directly. **Docker Model Runner (DMR)** sidesteps this by running llama.cpp with Metal *on the host* and exposing an OpenAI-compatible API at `model-runner.docker.internal:12434`. The validator stays containerised (plain Linux CPU build) and its `openai-compatible` provider points at the host endpoint over TCP — one ~1ms hop per inference, full Metal acceleration in practice.
+
+One-time setup:
+
+```bash
+# 1. Enable DMR's TCP endpoint (Docker Desktop 4.62+ required)
+docker desktop enable model-runner --tcp=12434
+# ...or via the CLI:
+knishio dmr enable
+
+# 2. Pull models (defaults to the two Qwen GGUFs our compose overlay expects)
+knishio dmr pull
+
+# 3. Verify
+knishio dmr status
+```
+
+After that, `knishio start -d` auto-routes through DMR with no extra flags.
+
+If you skip DMR, `knishio start` on an Apple Silicon Mac falls back to the **metal-native** profile: Postgres runs in Docker, and the CLI prints a copy-pasteable `cargo run --release --features metal` block for running the validator binary natively.
+
+### dmr
+
+Docker Model Runner control surface.
+
+```bash
+knishio dmr status
+knishio dmr enable
+knishio dmr pull [--model <REF>]
+```
+
+| Subcommand | Description |
+|---|---|
+| `status` | Print DMR client/server state, TCP reachability, cached model list |
+| `enable` | Enable DMR's TCP endpoint on `:12434` (wrapper over `docker desktop enable model-runner --tcp=12434`). Docker Desktop itself is toggled via its GUI (Settings → Beta/AI) — only the TCP exposure is CLI-controllable |
+| `pull [--model <REF>]` | Pull a model into the DMR cache. Without `--model`, pulls the two defaults used by `docker-compose.dmr.yml`: `hf.co/Qwen/Qwen3-Embedding-4B-GGUF` and `hf.co/Qwen/Qwen3.5-0.8B-GGUF` |
+
+```bash
+# Pull a specific model
+knishio dmr pull --model hf.co/Qwen/Qwen3-Embedding-8B-GGUF
+
+# Check what's cached and whether TCP is live
+knishio dmr status
+```
 
 ## Production Deployment
 
@@ -714,14 +842,14 @@ Hits `GET /db-check`. Reports migration status, missing tables, and missing trig
 
 The CLI automatically finds required files by walking up the directory tree from your current working directory.
 
-**Docker Compose file** — checks in order:
-1. `./<compose_file>` (from `knishio.toml` or default)
-2. `./knishio-validator-rust/<compose_file>`
-3. `./servers/knishio-validator-rust/<compose_file>`
+**Docker Compose files** — the resolved accel profile (see [Hardware Acceleration](#hardware-acceleration)) expands to a list of compose files; each is independently located by walking up from CWD through these candidates:
+1. `./<file>`
+2. `./knishio-validator-rust/<file>`
+3. `./servers/knishio-validator-rust/<file>`
 
-The default compose file is `docker-compose.standalone.yml`. After running `knishio init`, the generated `knishio.toml` points to `docker-compose.production.yml` instead.
+The files are then passed to `docker compose -f a -f b …` in order (base first, overlay second). Default accel-to-files mappings are baked into the CLI and can be overridden in `knishio.toml` under `[docker.accel.<name>]` tables.
 
-**Env file auto-loading** — when the compose file name contains "production" and a `.env.production` file exists in the same directory, the CLI automatically passes `--env-file .env.production` to Docker Compose.
+**Env file auto-loading** — when any compose file in the resolved chain has "production" in its name and a `.env.production` exists alongside it, the CLI automatically passes `--env-file .env.production` to Docker Compose.
 
 **Config file** — checks in order:
 1. `./knishio.toml`
@@ -732,6 +860,31 @@ The default compose file is `docker-compose.standalone.yml`. After running `knis
 This means the CLI works whether you run it from inside the validator dir, the servers dir, or the monorepo root.
 
 ## Example Workflows
+
+### Apple Silicon Development (GPU-accelerated via DMR)
+
+```bash
+# 1. One-time DMR setup (only if you haven't already)
+knishio dmr enable
+knishio dmr pull
+
+# 2. Confirm the CLI sees the right path
+knishio detect
+# → Accel:   dmr  (Apple Silicon + DMR TCP reachable)
+
+# 3. Start — auto-uses standalone.yml + dmr.yml
+knishio start -d --build
+
+# 4. Seed a cell
+knishio cell create TESTCELL --name "Test Cell"
+
+# 5. Exercise the RAG pipeline end-to-end
+knishio embed status
+knishio embed search "user profile"
+knishio embed ask "who has the most tokens?"
+```
+
+The validator container runs a plain Linux CPU build; embedding and generation traffic is routed to the host-side llama.cpp-with-Metal process DMR manages.
 
 ### Development
 

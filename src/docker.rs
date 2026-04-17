@@ -1,26 +1,44 @@
 //! Docker Compose control — start, stop, destroy, rebuild, logs, status, psql.
+//!
+//! Every public function accepts `files: &[PathBuf]` so an accel profile can
+//! assemble overlay chains like `docker compose -f base.yml -f cuda.yml …`.
+//! Callers resolve the chain via `crate::paths::find_compose_files`.
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 
 use crate::config::Config;
 use crate::output;
 
-/// Run `docker compose -f <file> <args...>`, inheriting stdout/stderr.
-///
-/// Automatically detects and loads `.env.production` if the compose file
-/// is `docker-compose.production.yml`, otherwise uses Docker's default `.env`.
-async fn compose(compose_file: &Path, args: &[&str]) -> Result<bool> {
-    let mut cmd = Command::new("docker");
-    cmd.arg("compose").arg("-f").arg(compose_file);
+/// Run `docker compose -f <file1> [-f <file2>…] <args...>`, inheriting
+/// stdout/stderr. Auto-detects `.env.production` when a `docker-compose.production.yml`
+/// layer is present in the chain.
+async fn compose(files: &[PathBuf], args: &[&str]) -> Result<bool> {
+    if files.is_empty() {
+        return Err(anyhow::anyhow!(
+            "compose() called with no compose files — this is a bug"
+        ));
+    }
 
-    // Auto-detect env file based on compose filename
-    if let Some(dir) = compose_file.parent() {
-        let env_production = dir.join(".env.production");
-        if env_production.exists() && compose_file.to_string_lossy().contains("production") {
-            cmd.arg("--env-file").arg(&env_production);
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose");
+    for f in files {
+        cmd.arg("-f").arg(f);
+    }
+
+    // Auto-detect env file if a production compose layer is present anywhere in
+    // the chain. Location: sibling to the first file's parent directory.
+    if files
+        .iter()
+        .any(|f| f.to_string_lossy().contains("production"))
+    {
+        if let Some(dir) = files[0].parent() {
+            let env_production = dir.join(".env.production");
+            if env_production.exists() {
+                cmd.arg("--env-file").arg(&env_production);
+            }
         }
     }
 
@@ -34,7 +52,7 @@ async fn compose(compose_file: &Path, args: &[&str]) -> Result<bool> {
     Ok(status.success())
 }
 
-pub async fn start(compose_file: &Path, build: bool, detach: bool) -> Result<()> {
+pub async fn start(files: &[PathBuf], build: bool, detach: bool) -> Result<()> {
     output::info("Starting KnishIO validator stack...");
     let mut args = vec!["up"];
     if build {
@@ -43,7 +61,7 @@ pub async fn start(compose_file: &Path, build: bool, detach: bool) -> Result<()>
     if detach {
         args.push("-d");
     }
-    if compose(compose_file, &args).await? {
+    if compose(files, &args).await? {
         if detach {
             output::success("Stack is running");
         }
@@ -53,9 +71,9 @@ pub async fn start(compose_file: &Path, build: bool, detach: bool) -> Result<()>
     Ok(())
 }
 
-pub async fn stop(compose_file: &Path) -> Result<()> {
+pub async fn stop(files: &[PathBuf]) -> Result<()> {
     output::info("Stopping KnishIO validator stack...");
-    if compose(compose_file, &["stop"]).await? {
+    if compose(files, &["stop"]).await? {
         output::success("Stack stopped");
     } else {
         output::error("docker compose stop failed");
@@ -63,14 +81,14 @@ pub async fn stop(compose_file: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn destroy(compose_file: &Path, volumes: bool) -> Result<()> {
+pub async fn destroy(files: &[PathBuf], volumes: bool) -> Result<()> {
     output::warn("Destroying KnishIO validator stack...");
     let mut args = vec!["down"];
     if volumes {
         args.push("-v");
         output::warn("Volumes will be removed (all data lost)");
     }
-    if compose(compose_file, &args).await? {
+    if compose(files, &args).await? {
         output::success("Stack destroyed");
     } else {
         output::error("docker compose down failed");
@@ -78,11 +96,11 @@ pub async fn destroy(compose_file: &Path, volumes: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn rebuild(compose_file: &Path) -> Result<()> {
+pub async fn rebuild(files: &[PathBuf]) -> Result<()> {
     output::info("Rebuilding KnishIO validator (no cache)...");
-    compose(compose_file, &["build", "--no-cache"]).await?;
+    compose(files, &["build", "--no-cache"]).await?;
     output::info("Starting rebuilt stack...");
-    if compose(compose_file, &["up", "-d"]).await? {
+    if compose(files, &["up", "-d"]).await? {
         output::success("Rebuilt and running");
     } else {
         output::error("Failed to start after rebuild");
@@ -90,7 +108,7 @@ pub async fn rebuild(compose_file: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn logs(compose_file: &Path, follow: bool, tail: Option<usize>) -> Result<()> {
+pub async fn logs(files: &[PathBuf], follow: bool, tail: Option<usize>) -> Result<()> {
     let mut args = vec!["logs"];
     if follow {
         args.push("--follow");
@@ -101,16 +119,17 @@ pub async fn logs(compose_file: &Path, follow: bool, tail: Option<usize>) -> Res
         args.push("--tail");
         args.push(&tail_str);
     }
-    compose(compose_file, &args).await?;
+    compose(files, &args).await?;
     Ok(())
 }
 
-pub async fn status(compose_file: &Path) -> Result<()> {
-    compose(compose_file, &["ps"]).await?;
+pub async fn status(files: &[PathBuf]) -> Result<()> {
+    compose(files, &["ps"]).await?;
     Ok(())
 }
 
 /// Open an interactive psql session or run a single SQL command.
+/// Doesn't take a compose file list — it goes straight to `docker exec`.
 pub async fn psql(cfg: &Config, sql_command: Option<&str>) -> Result<()> {
     let container = &cfg.docker.postgres_container;
     let db_user = &cfg.database.user;
@@ -143,4 +162,36 @@ pub async fn psql(cfg: &Config, sql_command: Option<&str>) -> Result<()> {
         output::error("psql session ended with error");
     }
     Ok(())
+}
+
+/// Print the Metal-native "next step" block for operators who chose that
+/// fallback path. Emitted after `start --accel metal-native` when DMR is
+/// unavailable. The hint points at the cargo invocation that spawns a native
+/// Metal-accelerated validator binary against the containerised Postgres.
+pub fn print_metal_native_hint(_cwd: &Path, cfg: &Config) {
+    output::header("Next step (Metal-native path):");
+    println!(
+        "  The validator cannot run inside a Linux container with Metal GPU\n\
+         access. Postgres is up via this stack; finish the setup natively:\n\n\
+         \x20 cd servers/knishio-validator-rust\n\
+         \x20 cargo build --release --features metal\n\
+         \x20 export DATABASE_URL=\"{}\"\n\
+         \x20 export EMBEDDING_ENABLED=true\n\
+         \x20 export EMBEDDING_PROVIDER=llama-cpp\n\
+         \x20 export EMBEDDING_MODEL_PATH=./models/Qwen3-Embedding-4B-Q8_0.gguf\n\
+         \x20 export EMBEDDING_GPU_LAYERS=999\n\
+         \x20 ./target/release/knishio-validator\n\n\
+         Or, to skip this extra step, enable Docker Model Runner:\n\
+         \x20 docker desktop enable model-runner --tcp=12434\n\
+         \x20 docker model pull hf.co/Qwen/Qwen3-Embedding-4B-GGUF\n\
+         \x20 knishio start --accel dmr",
+        db_url_for_native(cfg)
+    );
+}
+
+fn db_url_for_native(cfg: &Config) -> String {
+    format!(
+        "postgres://{}:{}@localhost:5432/{}",
+        cfg.database.user, cfg.database.user, cfg.database.name
+    )
 }

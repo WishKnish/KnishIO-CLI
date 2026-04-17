@@ -1,12 +1,19 @@
 # KnishIO CLI Configuration
 #
 # Resolution order (highest priority wins):
-#   1. CLI flags (--url, etc.)
-#   2. Environment variables (KNISHIO_URL, etc.)
+#   1. CLI flags (--url, --accel, etc.)
+#   2. Environment variables (KNISHIO_URL, KNISHIO_ACCEL, etc.)
 #   3. This file (auto-discovered by walking up from CWD)
 #   4. Built-in defaults
 #
-# All values below are the defaults — uncomment and modify as needed.
+# All values below are defaults — uncomment and modify as needed.
+
+# Pin the accel profile for this deployment and skip auto-detection.
+# Useful for CI rigs that need deterministic behavior or for locking a prod
+# host to a specific stack. Accepts: cpu | cuda | dmr | metal-native | rocm | vulkan
+# Leave commented-out (or set KNISHIO_ACCEL=auto in env) to use the detected
+# profile on every invocation.
+# default_accel = "cpu"
 
 [validator]
 # url = "https://localhost:8080"
@@ -14,9 +21,27 @@
 insecure_tls = true
 
 [docker]
+# Back-compat single-file knob. Ignored when the accel matrix below (which
+# takes priority) has a non-empty `files` list for the resolved accel.
 # compose_file = "docker-compose.standalone.yml"
 # postgres_container = "knishio-postgres"
 # validator_container = "knishio-validator"
+
+# Per-accel overlay chains. The CLI runs `docker compose -f <a> -f <b> …` with
+# the files in this order. Any accel not listed here uses the baked-in default.
+#
+# [docker.accel.cpu]
+# files = ["docker-compose.standalone.yml"]
+#
+# [docker.accel.cuda]
+# files = ["docker-compose.standalone.yml", "docker-compose.cuda.yml"]
+#
+# [docker.accel.dmr]
+# files = ["docker-compose.standalone.yml", "docker-compose.dmr.yml"]
+#
+# [docker.accel.metal-native]
+# files = ["docker-compose.metal.yml"]
+# native_validator = true   # emits the "run this on host" hint after `start`
 
 [database]
 # user = "knishio"
