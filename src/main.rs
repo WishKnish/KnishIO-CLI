@@ -104,12 +104,6 @@ struct Cli {
     #[arg(long, global = true, default_value = "https://localhost:8080")]
     url: String,
 
-    /// Hardware acceleration profile. `auto` auto-detects the host
-    /// (Apple Silicon → DMR or metal-native, NVIDIA → cuda, otherwise cpu).
-    /// Override to force a specific stack.
-    #[arg(long, global = true, value_enum, default_value_t = AccelFlag::Auto)]
-    accel: AccelFlag,
-
     #[command(subcommand)]
     command: Commands,
 }
@@ -151,20 +145,37 @@ enum Commands {
         /// Run in detached mode
         #[arg(short, long)]
         detach: bool,
+
+        /// Hardware acceleration profile. `auto` auto-detects the host
+        /// (Apple Silicon → DMR or metal-native, NVIDIA → cuda, otherwise cpu).
+        #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
+        accel: AccelFlag,
     },
 
     /// Stop the validator stack
-    Stop,
+    Stop {
+        /// Hardware acceleration profile used by the running stack.
+        #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
+        accel: AccelFlag,
+    },
 
     /// Destroy the validator stack (docker compose down)
     Destroy {
         /// Also remove volumes (all data lost!)
         #[arg(long)]
         volumes: bool,
+
+        /// Hardware acceleration profile used by the running stack.
+        #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
+        accel: AccelFlag,
     },
 
     /// Rebuild validator image from scratch and restart
-    Rebuild,
+    Rebuild {
+        /// Hardware acceleration profile to target on restart.
+        #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
+        accel: AccelFlag,
+    },
 
     /// Pull/build latest version, restart, and verify health
     Update {
@@ -175,6 +186,10 @@ enum Commands {
         /// Roll back to previous version
         #[arg(long, conflicts_with = "build")]
         rollback: bool,
+
+        /// Hardware acceleration profile to target on restart.
+        #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
+        accel: AccelFlag,
     },
 
     /// Show container logs
@@ -186,10 +201,18 @@ enum Commands {
         /// Number of lines to show from end
         #[arg(long)]
         tail: Option<usize>,
+
+        /// Hardware acceleration profile used by the running stack.
+        #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
+        accel: AccelFlag,
     },
 
     /// Show container status
-    Status,
+    Status {
+        /// Hardware acceleration profile used by the running stack.
+        #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
+        accel: AccelFlag,
+    },
 
     /// Docker Model Runner (macOS GPU bridge) control
     Dmr {
@@ -528,29 +551,29 @@ async fn main() -> Result<()> {
         }
 
         // ── Docker control (all accel-aware) ────────────────
-        Commands::Start { build, detach } => {
-            let (accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+        Commands::Start { build, detach, accel } => {
+            let (accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::start(&files, build, detach).await?;
             if cfg.accel_is_native(accel) {
                 docker::print_metal_native_hint(&cwd, &cfg);
             }
         }
-        Commands::Stop => {
-            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+        Commands::Stop { accel } => {
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::stop(&files).await?;
         }
-        Commands::Destroy { volumes } => {
-            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+        Commands::Destroy { volumes, accel } => {
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::destroy(&files, volumes).await?;
         }
-        Commands::Rebuild => {
-            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+        Commands::Rebuild { accel } => {
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::rebuild(&files).await?;
         }
-        Commands::Update { build, rollback } => {
+        Commands::Update { build, rollback, accel } => {
             // update module still takes a single compose file; reuse the first
             // (base) file in the resolved chain so back-compat is preserved.
-            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             let base = files
                 .first()
                 .cloned()
@@ -561,12 +584,12 @@ async fn main() -> Result<()> {
                 update::update(&base, &cfg, build).await?;
             }
         }
-        Commands::Logs { follow, tail } => {
-            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+        Commands::Logs { follow, tail, accel } => {
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::logs(&files, follow, tail).await?;
         }
-        Commands::Status => {
-            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, cli.accel)?;
+        Commands::Status { accel } => {
+            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::status(&files).await?;
         }
 
