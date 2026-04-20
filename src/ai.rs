@@ -36,6 +36,21 @@ struct GenerationStatus {
     enabled: bool,
     provider: Option<String>,
     model: Option<String>,
+    /// Sampling / context params currently in effect. Optional so this
+    /// CLI stays compatible with older validator builds that don't
+    /// expose the field.
+    #[serde(default)]
+    sampling: Option<SamplingParams>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SamplingParams {
+    temperature: f32,
+    top_p: f32,
+    frequency_penalty: f32,
+    presence_penalty: f32,
+    max_tokens: u32,
+    n_ctx: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +132,19 @@ fn render(s: &AiStatusResponse, base_url: &str) {
         (true, provider, model) => {
             row_check("enabled", provider.as_deref().unwrap_or(""), true);
             row("model", model.as_deref().unwrap_or("—"));
+            if let Some(sp) = &s.generation.sampling {
+                row(
+                    "sampling",
+                    &format!(
+                        "temp={:.2} top_p={:.2} freq={:.2} pres={:.2}",
+                        sp.temperature, sp.top_p, sp.frequency_penalty, sp.presence_penalty
+                    ),
+                );
+                row(
+                    "tokens",
+                    &format!("max={} n_ctx={}", sp.max_tokens, sp.n_ctx),
+                );
+            }
         }
         (false, _, _) => {
             row_check("disabled", "GENERATION_ENABLED=false", false);
