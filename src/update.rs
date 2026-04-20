@@ -20,23 +20,28 @@ const READYZ_TIMEOUT: Duration = Duration::from_secs(120);
 const READYZ_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Pull latest images and restart with health verification.
-pub async fn update(compose_file: &Path, cfg: &Config, build_from_source: bool) -> Result<()> {
+pub async fn update(
+    compose_file: &Path,
+    cfg: &Config,
+    build_from_source: bool,
+    env: &[(&str, &str)],
+) -> Result<()> {
     // 1. Capture current version before update
     let version_before = get_version(&cfg.validator.url, cfg.validator.insecure_tls).await;
 
     if build_from_source {
         // Source-based update: rebuild images
         output::info("Rebuilding from source...");
-        compose(compose_file, &["build"]).await?;
+        compose(compose_file, &["build"], env).await?;
     } else {
         // Registry-based update: pull latest images
         output::info("Pulling latest images...");
-        compose(compose_file, &["pull"]).await?;
+        compose(compose_file, &["pull"], env).await?;
     }
 
     // 2. Restart with new images (only recreates changed services)
     output::info("Restarting services...");
-    compose(compose_file, &["up", "-d"]).await?;
+    compose(compose_file, &["up", "-d"], env).await?;
 
     // 3. Wait for readyz
     output::info("Waiting for validator to become ready...");
@@ -57,7 +62,7 @@ pub async fn update(compose_file: &Path, cfg: &Config, build_from_source: bool) 
         output::warn("Checking container logs for errors...");
 
         // Show recent logs for debugging
-        let _ = compose(compose_file, &["logs", "--tail", "50", "validator"]).await;
+        let _ = compose(compose_file, &["logs", "--tail", "50", "validator"], &[]).await;
 
         output::error("Update may have failed. Options:");
         output::info("  1. Check logs:    knishio logs --follow");
@@ -75,7 +80,7 @@ pub async fn rollback(compose_file: &Path, cfg: &Config) -> Result<()> {
     output::warn("Rolling back — restarting with previous images...");
 
     // Force recreate containers with existing images
-    compose(compose_file, &["up", "-d", "--force-recreate"]).await?;
+    compose(compose_file, &["up", "-d", "--force-recreate"], &[]).await?;
 
     // Wait for health
     output::info("Waiting for validator to become ready...");
@@ -139,7 +144,7 @@ fn build_client(insecure_tls: bool) -> Result<reqwest::Client> {
 
 /// Run a docker compose command, inheriting stdout/stderr.
 /// Auto-detects `.env.production` for production compose files.
-async fn compose(compose_file: &Path, args: &[&str]) -> Result<bool> {
+async fn compose(compose_file: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<bool> {
     let mut cmd = Command::new("docker");
     cmd.arg("compose").arg("-f").arg(compose_file);
 
@@ -148,6 +153,10 @@ async fn compose(compose_file: &Path, args: &[&str]) -> Result<bool> {
         if env_production.exists() && compose_file.to_string_lossy().contains("production") {
             cmd.arg("--env-file").arg(&env_production);
         }
+    }
+
+    for (k, v) in env {
+        cmd.env(k, v);
     }
 
     let status = cmd

@@ -31,6 +31,14 @@ knishio destroy --volumes
 
 Every docker-touching command prints an **Environment** block so you always see exactly what was detected and which compose stack is running. Override auto-detection with `--accel <name>` — see [Hardware Acceleration](#hardware-acceleration).
 
+**Pipe-friendly output**: meta-messages (status banners, progress, warnings) go to stderr; actual command data goes to stdout. Everything chains cleanly:
+
+```bash
+knishio metrics --raw | grep embedding_backfill
+knishio ai status > /tmp/snapshot.txt           # only the body
+knishio watch embeddings | jq -r '.metaId'      # only the events
+```
+
 ### Production Quick Start
 
 ```bash
@@ -313,13 +321,15 @@ All Docker commands locate the compose file automatically by walking up from you
 Start the validator stack (Postgres + validator).
 
 ```bash
-knishio start [--build] [-d, --detach]
+knishio start [--build] [-d, --detach] [--accel <profile>] [--gen-model <name>]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--build` | Build images before starting |
 | `-d, --detach` | Run in detached mode (background) |
+| `--accel <profile>` | Override auto-detected accel (`auto`/`cpu`/`cuda`/`dmr`/`metal-native`/`rocm`/`vulkan`) |
+| `--gen-model <name>` | Override generation model for this run. Short aliases: `gemma`, `qwen3.5`, `qwen3-0.6b`. Full refs (`huggingface.co/...`) pass through. |
 
 ```bash
 # Interactive foreground
@@ -327,7 +337,12 @@ knishio start
 
 # Detached with rebuild
 knishio start -d --build
+
+# A/B a different generation model for this stack
+knishio start -d --gen-model qwen3.5
 ```
+
+The `--gen-model` flag sets `GENERATION_MODEL` for the subprocess environment; `docker-compose.dmr.yml` expands `${GENERATION_MODEL:-…}` against it.
 
 ### stop
 
@@ -354,8 +369,10 @@ knishio destroy [--volumes]
 Full no-cache rebuild of the validator image, then restart in detached mode.
 
 ```bash
-knishio rebuild
+knishio rebuild [--accel <profile>] [--gen-model <name>]
 ```
+
+Same `--accel` + `--gen-model` flags as `start`.
 
 Equivalent to:
 ```bash
@@ -773,14 +790,25 @@ HTTP GET requests to the validator's health endpoints. TLS certificates are vali
 
 ### health
 
-Quick liveness check.
+Liveness check by default, or a richer report with `--full`.
 
 ```bash
+# Liveness (GET /healthz) — cheap, always 200 if the process is alive
 knishio health
 # ✓ Healthy (https://localhost:8080)
-```
 
-Hits `GET /healthz`. Returns success on HTTP 200.
+# Full report (GET /health) — DB latency + cache stats + version
+knishio health --full
+# ✓ Healthy (https://localhost:8080) · v0.2.0
+#
+# Database
+#   status        connected
+#   latency       1 ms
+#
+# Query-embedding cache
+#   entries       0
+#   hit ratio     0.00
+```
 
 ### ready
 
@@ -837,6 +865,124 @@ knishio db
 ```
 
 Hits `GET /db-check`. Reports migration status, missing tables, and missing triggers.
+
+## Observability
+
+Live introspection into the AI pipeline + validator metrics.
+
+### ai status
+
+AI pipeline snapshot: provider, model, sampling parameters, recent inference latency, backfill coverage, query-cache hit rate, acceleration label.
+
+```bash
+knishio ai status
+# Embedding
+#   ✓ enabled        openai-compatible
+#   model            huggingface.co/qwen/qwen3-embedding-4b-gguf:latest
+#   dimensions       2560
+#
+# Generation
+#   ✓ enabled        openai-compatible
+#   model            huggingface.co/unsloth/gemma-4-e4b-it-gguf:latest
+#   sampling         temp=0.60 top_p=0.95 freq=0.70 pres=0.40
+#   tokens           max=6144 n_ctx=12288
+#   recent           2 calls over 43s · 0 errors · avg 33.8s · min 25.1s · max 42.5s
+#
+# Backfill
+#   ✓ coverage       5,885 / 5,885
+# …
+```
+
+Hits `GET /ai/status`. The `recent` block summarises the last 100 generation calls via an in-memory ring buffer — useful for "is the model slow right now?" during debugging. Prometheus histograms at `/metrics` give the long-window view; use `knishio metrics` below.
+
+### metrics
+
+Fetch + pretty-print the validator's Prometheus scrape, grouped by subsystem.
+
+```bash
+knishio metrics
+# Validator metrics (https://localhost:8080)
+#
+# AI / Embedding
+#   knishio_embedding_backfill_pending                 0
+#
+# AI / Model Load
+#   knishio_model_load_seconds{service="embedding"}    0.000044
+#   knishio_model_load_seconds{service="generation"}   0.000009
+#
+# Database
+#   knishio_db_connections_active                      0
+#   …
+```
+
+| Flag | Description |
+|------|-------------|
+| `--filter <substring>` | Case-insensitive match on metric name — e.g. `--filter embedding` shows only AI-embedding metrics |
+| `--raw` | Passthrough the raw Prometheus text exposition for piping into another parser |
+
+```bash
+# Filter to a subsystem
+knishio metrics --filter cache
+
+# Pipe into prom-to-JSON
+knishio metrics --raw | prom2json
+```
+
+Histograms render as `count=N sum=Ts avg=Ts`; for full bucket counts use `--raw`.
+
+### watch embeddings
+
+Live-stream DataBraid embedding-pipeline events as rows get embedded (subscription `embeddingChanges`). Emits one JSON event per line on stdout, jq-friendly. Ctrl-C closes the subscription cleanly.
+
+```bash
+knishio watch embeddings
+# ℹ Subscribed to embeddingChanges; streaming events (Ctrl-C to stop)…
+# {"embeddedAt":1776718124,"key":"audienceData","metaId":"pet-wants-1","metaType":"KKStore","model":"…","molecularHash":"…","state":"COMPLETE"}
+# {"embeddedAt":1776718125,"key":"description","metaId":"pet-wants-1","metaType":"KKStore", …}
+# …
+```
+
+| Flag | Description |
+|------|-------------|
+| `--meta-type <T>` | Filter to a single MetaType (e.g. `KKStore`) |
+| `--meta-id <I>` | Filter to a single MetaId |
+
+### watch dag
+
+Live-stream DAG structure events (subscription `dagChanges`) — molecule acceptance + bond creation.
+
+```bash
+knishio watch dag
+# ℹ Subscribed to dagChanges; streaming events (Ctrl-C to stop)…
+# {"eventType":"MOLECULE_ACCEPTED","molecularHash":"…","status":"accepted","height":42,"cellSlug":"TESTCELL", …}
+# {"eventType":"BOND_CREATED","molecularHash":"…","bondType":"M_TIER1","bondHash":"…", …}
+# …
+```
+
+| Flag | Description |
+|------|-------------|
+| `--cell <slug>` | Filter to a single cell's DAG events |
+
+Uses the modern `graphql-transport-ws` subprotocol over WSS. Self-signed certificates are accepted when `insecure_tls = true` is set in config.
+
+## Shell Integration
+
+### completions
+
+Generate a shell completion script. Redirect to your shell's completion directory for persistent tab-completion of subcommands, flags, and enum values.
+
+```bash
+# Zsh (~/.zsh/completion/)
+knishio completions zsh > ~/.zsh/completion/_knishio
+
+# Bash
+knishio completions bash > /etc/bash_completion.d/knishio
+
+# Fish
+knishio completions fish > ~/.config/fish/completions/knishio.fish
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 
 ## Path Discovery
 

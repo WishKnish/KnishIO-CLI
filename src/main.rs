@@ -102,7 +102,8 @@ use crate::detect::Accel;
     propagate_version = true
 )]
 struct Cli {
-    /// Validator base URL (for health commands)
+    /// Validator base URL for all HTTP + WS subcommands (health, ready,
+    /// full, db, ai, metrics, watch, embed).
     #[arg(long, global = true, default_value = "https://localhost:8080")]
     url: String,
 
@@ -204,6 +205,11 @@ enum Commands {
         /// Hardware acceleration profile to target on restart.
         #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
         accel: AccelFlag,
+
+        /// Override generation model for this update (same alias set
+        /// as `start --gen-model`). Ignored when `--rollback` is set.
+        #[arg(long)]
+        gen_model: Option<String>,
     },
 
     /// Show container logs
@@ -663,7 +669,12 @@ async fn main() -> Result<()> {
             };
             docker::rebuild(&files, &env).await?;
         }
-        Commands::Update { build, rollback, accel } => {
+        Commands::Update {
+            build,
+            rollback,
+            accel,
+            gen_model,
+        } => {
             // update module still takes a single compose file; reuse the first
             // (base) file in the resolved chain so back-compat is preserved.
             let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
@@ -674,7 +685,12 @@ async fn main() -> Result<()> {
             if rollback {
                 update::rollback(&base, &cfg).await?;
             } else {
-                update::update(&base, &cfg, build).await?;
+                let resolved = gen_model.as_deref().map(docker::resolve_gen_model);
+                let env: Vec<(&str, &str)> = match &resolved {
+                    Some(m) => vec![("GENERATION_MODEL", m.as_str())],
+                    None => vec![],
+                };
+                update::update(&base, &cfg, build, &env).await?;
             }
         }
         Commands::Logs { follow, tail, accel } => {
