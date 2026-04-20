@@ -59,6 +59,72 @@ pub async fn healthz(base: &str, insecure_tls: bool) -> Result<()> {
     Ok(())
 }
 
+/// Richer health probe: hits `/health` (not `/healthz`) which includes
+/// DB connectivity + latency, cache stats, and the validator version.
+/// Used when `knishio health --full` is invoked.
+pub async fn health_full(base: &str, insecure_tls: bool) -> Result<()> {
+    let (status, body) = get_endpoint(base, "/health", insecure_tls).await?;
+
+    if status != 200 {
+        output::error(&format!("Unhealthy — HTTP {} : {}", status, body));
+        return Ok(());
+    }
+
+    let json: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            output::error("Could not parse /health response as JSON");
+            println!("{}", body);
+            return Ok(());
+        }
+    };
+
+    let overall = json
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    let version = json
+        .get("version")
+        .and_then(|s| s.as_str())
+        .unwrap_or("?");
+
+    if overall == "healthy" {
+        output::success(&format!("Healthy ({}) · v{}", base, version));
+    } else {
+        output::error(&format!("Status: {} ({}) · v{}", overall, base, version));
+    }
+
+    output::header("Database");
+    if let Some(db) = json.get("database") {
+        let status = db.get("status").and_then(|s| s.as_str()).unwrap_or("?");
+        let latency = db.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+        let status_label = if status == "connected" {
+            status.green().to_string()
+        } else {
+            status.yellow().to_string()
+        };
+        println!("  status        {}", status_label);
+        println!("  latency       {} ms", latency);
+    } else {
+        println!("  {}", "(no database section in response)".dimmed());
+    }
+
+    output::header("Query-embedding cache");
+    if let Some(cache) = json.get("cache") {
+        let entries = cache.get("entries").and_then(|v| v.as_u64()).unwrap_or(0);
+        let hit_ratio = cache
+            .get("hit_ratio")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.00");
+        println!("  entries       {}", entries);
+        println!("  hit ratio     {}", hit_ratio);
+    } else {
+        println!("  {}", "(no cache section in response)".dimmed());
+    }
+
+    Ok(())
+}
+
 pub async fn readyz(base: &str, full: bool, insecure_tls: bool) -> Result<()> {
     let (status, body) = get_endpoint(base, "/readyz", insecure_tls).await?;
     if status == 200 {

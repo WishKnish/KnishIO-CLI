@@ -77,6 +77,7 @@ mod docker;
 mod embed;
 mod health;
 mod init;
+mod metrics;
 mod output;
 mod paths;
 mod update;
@@ -279,8 +280,14 @@ enum Commands {
         command: EmbedCommands,
     },
 
-    /// Quick health check (GET /healthz)
-    Health,
+    /// Health check. Defaults to the liveness probe (GET /healthz);
+    /// `--full` hits the richer /health endpoint with DB latency + cache
+    /// stats + validator version.
+    Health {
+        /// Hit `/health` instead of `/healthz` for a fuller report.
+        #[arg(long)]
+        full: bool,
+    },
 
     /// Readiness check (GET /readyz)
     Ready,
@@ -290,6 +297,23 @@ enum Commands {
 
     /// Database consistency check (GET /db-check)
     Db,
+
+    /// Fetch and pretty-print the validator's Prometheus scrape
+    /// (GET /metrics). Groups samples by subsystem (AI, Cache, DB,
+    /// HTTP/GraphQL, Molecule Processing, …); histograms collapse
+    /// to count/sum/avg.
+    Metrics {
+        /// Case-insensitive substring filter on metric name, e.g.
+        /// `--filter embedding` to show only AI-embedding counters.
+        #[arg(long)]
+        filter: Option<String>,
+
+        /// Passthrough the raw Prometheus text exposition to stdout
+        /// (equivalent to `curl /metrics`). Useful for piping into
+        /// another parser.
+        #[arg(long)]
+        raw: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -782,8 +806,12 @@ async fn main() -> Result<()> {
         },
 
         // ── Health checks ───────────────────────────────────
-        Commands::Health => {
-            health::healthz(&cfg.validator.url, cfg.validator.insecure_tls).await?;
+        Commands::Health { full } => {
+            if full {
+                health::health_full(&cfg.validator.url, cfg.validator.insecure_tls).await?;
+            } else {
+                health::healthz(&cfg.validator.url, cfg.validator.insecure_tls).await?;
+            }
         }
         Commands::Ready => {
             health::readyz(&cfg.validator.url, false, cfg.validator.insecure_tls).await?;
@@ -793,6 +821,9 @@ async fn main() -> Result<()> {
         }
         Commands::Db => {
             health::db_check(&cfg.validator.url, cfg.validator.insecure_tls).await?;
+        }
+        Commands::Metrics { filter, raw } => {
+            metrics::metrics(&cfg, filter.as_deref(), raw).await?;
         }
     }
 
