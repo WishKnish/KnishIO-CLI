@@ -41,6 +41,11 @@ struct GenerationStatus {
     /// expose the field.
     #[serde(default)]
     sampling: Option<SamplingParams>,
+    /// Recent inference activity summary (latency + success/error
+    /// counts). Optional: absent when generation is disabled or no
+    /// calls have completed since startup.
+    #[serde(default)]
+    recent: Option<RecentInferenceStats>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +56,17 @@ struct SamplingParams {
     presence_penalty: f32,
     max_tokens: u32,
     n_ctx: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecentInferenceStats {
+    window_secs: u64,
+    count: usize,
+    success_count: usize,
+    error_count: usize,
+    avg_latency_secs: f64,
+    min_latency_secs: f64,
+    max_latency_secs: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +159,25 @@ fn render(s: &AiStatusResponse, base_url: &str) {
                 row(
                     "tokens",
                     &format!("max={} n_ctx={}", sp.max_tokens, sp.n_ctx),
+                );
+            }
+            if let Some(r) = &s.generation.recent {
+                let err_label = if r.error_count == 0 {
+                    format!("{} errors", r.error_count).green().to_string()
+                } else {
+                    format!("{} errors", r.error_count).yellow().to_string()
+                };
+                row(
+                    "recent",
+                    &format!(
+                        "{} calls over {}s · {} · avg {:.1}s · min {:.1}s · max {:.1}s",
+                        r.count,
+                        r.window_secs,
+                        err_label,
+                        r.avg_latency_secs,
+                        r.min_latency_secs,
+                        r.max_latency_secs
+                    ),
                 );
             }
         }

@@ -150,6 +150,13 @@ enum Commands {
         /// (Apple Silicon → DMR or metal-native, NVIDIA → cuda, otherwise cpu).
         #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
         accel: AccelFlag,
+
+        /// Override generation model. Accepts short aliases
+        /// (`gemma`, `qwen3.5`, `qwen3-0.6b`) or a full ref like
+        /// `huggingface.co/unsloth/...:latest`. Takes precedence over
+        /// the `GENERATION_MODEL` shell env; overridden by nothing.
+        #[arg(long)]
+        gen_model: Option<String>,
     },
 
     /// Stop the validator stack
@@ -175,6 +182,11 @@ enum Commands {
         /// Hardware acceleration profile to target on restart.
         #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
         accel: AccelFlag,
+
+        /// Override generation model on the restart. Same alias set
+        /// as `start --gen-model`.
+        #[arg(long)]
+        gen_model: Option<String>,
     },
 
     /// Pull/build latest version, restart, and verify health
@@ -551,9 +563,19 @@ async fn main() -> Result<()> {
         }
 
         // ── Docker control (all accel-aware) ────────────────
-        Commands::Start { build, detach, accel } => {
+        Commands::Start {
+            build,
+            detach,
+            accel,
+            gen_model,
+        } => {
             let (accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
-            docker::start(&files, build, detach).await?;
+            let resolved = gen_model.as_deref().map(docker::resolve_gen_model);
+            let env: Vec<(&str, &str)> = match &resolved {
+                Some(m) => vec![("GENERATION_MODEL", m.as_str())],
+                None => vec![],
+            };
+            docker::start(&files, build, detach, &env).await?;
             if cfg.accel_is_native(accel) {
                 docker::print_metal_native_hint(&cwd, &cfg);
             }
@@ -566,9 +588,14 @@ async fn main() -> Result<()> {
             let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::destroy(&files, volumes).await?;
         }
-        Commands::Rebuild { accel } => {
+        Commands::Rebuild { accel, gen_model } => {
             let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
-            docker::rebuild(&files).await?;
+            let resolved = gen_model.as_deref().map(docker::resolve_gen_model);
+            let env: Vec<(&str, &str)> = match &resolved {
+                Some(m) => vec![("GENERATION_MODEL", m.as_str())],
+                None => vec![],
+            };
+            docker::rebuild(&files, &env).await?;
         }
         Commands::Update { build, rollback, accel } => {
             // update module still takes a single compose file; reuse the first

@@ -15,7 +15,20 @@ use crate::output;
 /// Run `docker compose -f <file1> [-f <file2>…] <args...>`, inheriting
 /// stdout/stderr. Auto-detects `.env.production` when a `docker-compose.production.yml`
 /// layer is present in the chain.
-async fn compose(files: &[PathBuf], args: &[&str]) -> Result<bool> {
+/// Resolve a user-supplied generation-model short alias to a full
+/// DMR model reference. Unknown strings pass through unchanged so
+/// operators can supply arbitrary `huggingface.co/...` or `ai/...`
+/// refs directly.
+pub fn resolve_gen_model(name: &str) -> String {
+    match name {
+        "gemma" | "gemma-4-e4b" => "huggingface.co/unsloth/gemma-4-e4b-it-gguf:latest".into(),
+        "qwen3.5" | "qwen3.5-0.8b" => "huggingface.co/unsloth/qwen3.5-0.8b-gguf:latest".into(),
+        "qwen3-0.6b" => "huggingface.co/unsloth/qwen3-0.6b-gguf:latest".into(),
+        other => other.to_string(),
+    }
+}
+
+async fn compose(files: &[PathBuf], args: &[&str], env: &[(&str, &str)]) -> Result<bool> {
     if files.is_empty() {
         return Err(anyhow::anyhow!(
             "compose() called with no compose files — this is a bug"
@@ -26,6 +39,13 @@ async fn compose(files: &[PathBuf], args: &[&str]) -> Result<bool> {
     cmd.arg("compose");
     for f in files {
         cmd.arg("-f").arg(f);
+    }
+
+    // Inject any env overrides (e.g. GENERATION_MODEL from --gen-model).
+    // Docker compose inherits the subprocess env and expands `${VAR:-…}`
+    // against it, so setting these here shadows whatever the shell had.
+    for (k, v) in env {
+        cmd.env(k, v);
     }
 
     // Auto-detect env file if a production compose layer is present anywhere in
@@ -52,7 +72,12 @@ async fn compose(files: &[PathBuf], args: &[&str]) -> Result<bool> {
     Ok(status.success())
 }
 
-pub async fn start(files: &[PathBuf], build: bool, detach: bool) -> Result<()> {
+pub async fn start(
+    files: &[PathBuf],
+    build: bool,
+    detach: bool,
+    env: &[(&str, &str)],
+) -> Result<()> {
     output::info("Starting KnishIO validator stack...");
     let mut args = vec!["up"];
     if build {
@@ -61,7 +86,7 @@ pub async fn start(files: &[PathBuf], build: bool, detach: bool) -> Result<()> {
     if detach {
         args.push("-d");
     }
-    if compose(files, &args).await? {
+    if compose(files, &args, env).await? {
         if detach {
             output::success("Stack is running");
         }
@@ -73,7 +98,7 @@ pub async fn start(files: &[PathBuf], build: bool, detach: bool) -> Result<()> {
 
 pub async fn stop(files: &[PathBuf]) -> Result<()> {
     output::info("Stopping KnishIO validator stack...");
-    if compose(files, &["stop"]).await? {
+    if compose(files, &["stop"], &[]).await? {
         output::success("Stack stopped");
     } else {
         output::error("docker compose stop failed");
@@ -88,7 +113,7 @@ pub async fn destroy(files: &[PathBuf], volumes: bool) -> Result<()> {
         args.push("-v");
         output::warn("Volumes will be removed (all data lost)");
     }
-    if compose(files, &args).await? {
+    if compose(files, &args, &[]).await? {
         output::success("Stack destroyed");
     } else {
         output::error("docker compose down failed");
@@ -96,11 +121,11 @@ pub async fn destroy(files: &[PathBuf], volumes: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn rebuild(files: &[PathBuf]) -> Result<()> {
+pub async fn rebuild(files: &[PathBuf], env: &[(&str, &str)]) -> Result<()> {
     output::info("Rebuilding KnishIO validator (no cache)...");
-    compose(files, &["build", "--no-cache"]).await?;
+    compose(files, &["build", "--no-cache"], env).await?;
     output::info("Starting rebuilt stack...");
-    if compose(files, &["up", "-d"]).await? {
+    if compose(files, &["up", "-d"], env).await? {
         output::success("Rebuilt and running");
     } else {
         output::error("Failed to start after rebuild");
@@ -119,12 +144,12 @@ pub async fn logs(files: &[PathBuf], follow: bool, tail: Option<usize>) -> Resul
         args.push("--tail");
         args.push(&tail_str);
     }
-    compose(files, &args).await?;
+    compose(files, &args, &[]).await?;
     Ok(())
 }
 
 pub async fn status(files: &[PathBuf]) -> Result<()> {
-    compose(files, &["ps"]).await?;
+    compose(files, &["ps"], &[]).await?;
     Ok(())
 }
 
