@@ -81,6 +81,7 @@ mod metrics;
 mod output;
 mod paths;
 mod update;
+mod watch;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -313,6 +314,47 @@ enum Commands {
         /// another parser.
         #[arg(long)]
         raw: bool,
+    },
+
+    /// Print a shell completion script. Redirect to your shell's
+    /// completion directory, e.g.
+    ///   knishio completions zsh > ~/.zsh/completion/_knishio
+    ///   knishio completions bash > /etc/bash_completion.d/knishio
+    Completions {
+        /// Target shell: bash, zsh, fish, powershell, or elvish.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Live-stream a validator GraphQL subscription over WebSocket.
+    /// Emits one JSON event per line on stdout (jq-friendly). Ctrl-C
+    /// closes the subscription gracefully.
+    Watch {
+        #[command(subcommand)]
+        subject: WatchSubject,
+    },
+}
+
+#[derive(Subcommand)]
+enum WatchSubject {
+    /// Stream DataBraid embedding-pipeline events as rows get embedded
+    /// (subscription `embeddingChanges`).
+    Embeddings {
+        /// Filter by MetaType (e.g. `KKStore`).
+        #[arg(long)]
+        meta_type: Option<String>,
+
+        /// Filter by MetaId (e.g. `pet-wants-1`).
+        #[arg(long)]
+        meta_id: Option<String>,
+    },
+
+    /// Stream DAG structure events — molecule acceptance + bond
+    /// creation (subscription `dagChanges`).
+    Dag {
+        /// Filter to a single cell slug.
+        #[arg(long)]
+        cell: Option<String>,
     },
 }
 
@@ -825,6 +867,19 @@ async fn main() -> Result<()> {
         Commands::Metrics { filter, raw } => {
             metrics::metrics(&cfg, filter.as_deref(), raw).await?;
         }
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "knishio", &mut std::io::stdout());
+        }
+        Commands::Watch { subject } => match subject {
+            WatchSubject::Embeddings { meta_type, meta_id } => {
+                watch::embeddings(&cfg, meta_type, meta_id).await?;
+            }
+            WatchSubject::Dag { cell } => {
+                watch::dag(&cfg, cell).await?;
+            }
+        },
     }
 
     Ok(())

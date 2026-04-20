@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 
 # Async runtime
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "process"] }
@@ -58,6 +59,18 @@ rand = "0.8"
 
 # Async stream utilities (benchmark concurrent execution)
 futures-util = "0.3"
+
+# WebSocket client for `knishio watch *` — talks graphql-transport-ws
+# against the validator's /graphql/ws. rustls over native-tls because
+# the validator serves TLS 1.3 + ChaCha20-Poly1305 (rustls server side);
+# macOS SecureTransport via native-tls has known issues with that combo.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+# ring feature required — rustls 0.23 needs an explicit crypto provider;
+# default features don't always install one. Matches the crypto stack
+# reqwest (also used here) uses internally.
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pki-types = "1"
+webpki-roots = "0.26"
 
 [profile.release]
 opt-level = 3
