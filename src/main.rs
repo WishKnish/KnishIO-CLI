@@ -642,6 +642,7 @@ async fn main() -> Result<()> {
             gen_model,
         } => {
             let (accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
+            warn_feature_gated_accel_without_rebuild(accel, build);
             let resolved = gen_model.as_deref().map(docker::resolve_gen_model);
             let env: Vec<(&str, &str)> = match &resolved {
                 Some(m) => vec![("GENERATION_MODEL", m.as_str())],
@@ -677,7 +678,10 @@ async fn main() -> Result<()> {
         } => {
             // update module still takes a single compose file; reuse the first
             // (base) file in the resolved chain so back-compat is preserved.
-            let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
+            let (accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
+            if !rollback {
+                warn_feature_gated_accel_without_rebuild(accel, build);
+            }
             let base = files
                 .first()
                 .cloned()
@@ -1000,6 +1004,38 @@ fn resolve_accel_and_files(
             Ok((Accel::Cpu, resolved))
         }
     }
+}
+
+/// Warn when the operator selected a feature-gated GPU accel on a
+/// command that uses the EXISTING validator image (no rebuild). The
+/// `cuda.yml` / `rocm.yml` / `vulkan.yml` overlays set `CARGO_FEATURES`
+/// at build time only; on a default CPU-only image, the --accel flag
+/// then becomes a silent no-op and inference quietly falls back to
+/// CPU. This helper nudges the operator toward `knishio rebuild
+/// --accel <X>` first.
+///
+/// Deliberately excludes:
+///   - `Cpu`, `Dmr` — neither needs a feature-gated build.
+///   - `MetalNative` — that path prints its own bespoke hint via
+///     `docker::print_metal_native_hint` (which spells out the cargo
+///     rebuild command), so a second warning would be noise.
+fn warn_feature_gated_accel_without_rebuild(accel: Accel, will_rebuild: bool) {
+    if will_rebuild {
+        return;
+    }
+    let feature = match accel {
+        Accel::Cuda => "cuda",
+        Accel::Rocm => "rocm",
+        Accel::Vulkan => "vulkan",
+        _ => return,
+    };
+    output::warn(&format!(
+        "Accel '{}' requires a validator image built with --features {}. \
+         If this is a fresh setup, run `knishio rebuild --accel {}` first \
+         (or pass `--build` to this command); otherwise the --accel flag \
+         is a no-op on the existing image and inference stays on CPU.",
+        feature, feature, feature
+    ));
 }
 
 fn print_stack_line(files: &[String]) {

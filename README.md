@@ -712,6 +712,8 @@ knishio bench clean --all
 
 Manage the DataBraid VKG (Vector Knowledge Graph) embedding system. Requires `EMBEDDING_ENABLED=true` on the validator.
 
+> **Heads-up**: the standalone compose profile (`knishio start --accel cpu`) defaults `EMBEDDING_ENABLED=false`. The `--accel dmr` overlay re-enables it and points at Docker Model Runner on the host. For other paths, set `EMBEDDING_ENABLED=true` + `EMBEDDING_PROVIDER` + the provider-specific endpoint/key vars via a `.env` file or compose override.
+
 ### embed status
 
 Show embedding coverage statistics — how many metadata records have embeddings, which models are in use, and coverage percentages.
@@ -765,7 +767,7 @@ knishio embed search "device telemetry" --meta-type deviceTelemetry
 
 ### embed ask
 
-Ask a natural language question about DAG data using RAG (Retrieval-Augmented Generation). Requires `GENERATION_ENABLED=true` on the validator.
+Ask a natural language question about DAG data using RAG (Retrieval-Augmented Generation). Requires `GENERATION_ENABLED=true` on the validator — same caveat as `embed status` above: the standalone profile defaults this to `false`; `--accel dmr` re-enables it via the overlay.
 
 ```bash
 knishio embed ask <QUESTION> [--max-results <N>] [--threshold <F>] [--meta-type <TYPE>]

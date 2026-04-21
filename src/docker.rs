@@ -197,7 +197,9 @@ pub fn print_metal_native_hint(_cwd: &Path, cfg: &Config) {
     output::header("Next step (Metal-native path):");
     println!(
         "  The validator cannot run inside a Linux container with Metal GPU\n\
-         access. Postgres is up via this stack; finish the setup natively:\n\n\
+         access. Postgres is up via this stack; finish the setup natively.\n\
+         The `metal` feature cascades to `llama-cpp`, so the provider env\n\
+         var below is enabled by the rebuild:\n\n\
          \x20 cd servers/knishio-validator-rust\n\
          \x20 cargo build --release --features metal\n\
          \x20 export DATABASE_URL=\"{}\"\n\
