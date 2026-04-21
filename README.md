@@ -967,6 +967,23 @@ knishio watch dag
 
 Uses the modern `graphql-transport-ws` subprotocol over WSS. Self-signed certificates are accepted when `insecure_tls = true` is set in config.
 
+## Packaging
+
+### package
+
+Build a distributable tarball of the validator binary for bare-metal deployment. Wraps the validator's `Makefile` (`servers/knishio-validator-rust/Makefile`); the CLI finds the Makefile automatically via the same path-discovery pattern used by the docker subcommands.
+
+```bash
+knishio package                     # both macOS arm64 + Linux arm64 (default)
+knishio package --target mac        # macOS arm64 only
+knishio package --target linux      # Linux arm64 only
+knishio package --clean             # remove dist/ instead of building
+```
+
+Output: versioned tarballs under `servers/knishio-validator-rust/dist/`, each containing the stripped binary, a `SHAKE256SUMS` integrity manifest, `docker-compose.postgres.yml`, `.env.example`, and (Linux only) a `knishio-validator.service` systemd unit template. See the validator's README "Bare-Metal Deployment" section for the on-host install flow.
+
+Prereqs on the build machine: `rustup` with Rust 1.94.1+ (pinned via `rust-toolchain.toml`) and Docker (used for the Linux target's cross-platform build). `make` itself comes from Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu.
+
 ## Shell Integration
 
 ### completions

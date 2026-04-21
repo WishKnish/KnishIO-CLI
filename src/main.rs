@@ -79,6 +79,7 @@ mod health;
 mod init;
 mod metrics;
 mod output;
+mod package;
 mod paths;
 mod update;
 mod watch;
@@ -339,6 +340,33 @@ enum Commands {
         #[command(subcommand)]
         subject: WatchSubject,
     },
+
+    /// Build a distributable tarball of the validator binary (wraps
+    /// the validator's `Makefile`). Produces versioned archives in
+    /// `servers/knishio-validator-rust/dist/` with binary, deploy
+    /// assets, README, and SHAKE256SUMS manifest. See the validator
+    /// README "Bare-Metal Deployment" section for the install flow.
+    Package {
+        /// Which platforms to package. `all` builds both (default).
+        #[arg(long, value_enum, default_value_t = PackageTarget::All)]
+        target: PackageTarget,
+
+        /// Remove the dist/ output directory (runs `make clean`)
+        /// instead of packaging.
+        #[arg(long, conflicts_with = "target")]
+        clean: bool,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum PackageTarget {
+    /// Both macOS arm64 and Linux arm64
+    All,
+    /// macOS arm64 only (native cargo build)
+    Mac,
+    /// Linux arm64 only (docker buildx binary-export stage)
+    Linux,
 }
 
 #[derive(Subcommand)]
@@ -900,6 +928,17 @@ async fn main() -> Result<()> {
                 watch::dag(&cfg, cell).await?;
             }
         },
+        Commands::Package { target, clean } => {
+            if clean {
+                package::clean(&cwd).await?;
+            } else {
+                match target {
+                    PackageTarget::All => package::package_all(&cwd).await?,
+                    PackageTarget::Mac => package::package_mac(&cwd).await?,
+                    PackageTarget::Linux => package::package_linux(&cwd).await?,
+                }
+            }
+        }
     }
 
     Ok(())
