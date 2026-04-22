@@ -45,7 +45,11 @@ thiserror = "2.0"
 # Progress bars (benchmark)
 indicatif = "0.17"
 
-# KnishIO SDK for molecule signing and wallet operations (benchmark)
+# KnishIO SDK for molecule signing and wallet operations (benchmark).
+# Always a crates.io version string in shipped builds. Temporarily swap to
+# `{ path = "../../sdks/KnishIO-Client-Rust" }` ONLY while testing an
+# unpublished SDK change, then revert before shipping. Guard lives in
+# servers/knishio-validator-rust/Makefile → `check-no-path-dep`.
 knishio-client = "0.1.2"
 
 # SQLite for benchmark fixture storage
