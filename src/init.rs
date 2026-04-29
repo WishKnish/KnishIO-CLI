@@ -171,7 +171,17 @@ CORS_ORIGINS={origins}
 # Host port for the validator
 VALIDATOR_PORT=8080
 
-# Embedding / Generation (disabled by default)
+# ── AI Pipeline (Embedding + Generation) ─────────────────────────
+# Set EMBEDDING_ENABLED=true and/or GENERATION_ENABLED=true to opt in.
+# When enabled WITHOUT EMBEDDING_BASE_URL/EMBEDDING_MODEL, the validator
+# auto-probes Docker Model Runner (localhost:12434) and ollama
+# (localhost:11434) at startup, picks the smallest matching model, and
+# fills the gaps. Explicit overrides are respected (auto-config only
+# fills missing values).
+#
+# QA-020 caveat: enabling embedding adds ~150ms per molecule INSERT
+# (synchronous embedding in the INSERT path; Round-20 async work is
+# tracked separately). For high-throughput workloads, weigh the cost.
 EMBEDDING_ENABLED=false
 GENERATION_ENABLED=false
 "#

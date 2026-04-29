@@ -461,7 +461,7 @@ pub async fn search(
         if msg.contains("Embedding service not available") || msg.contains("not enabled") {
             output::error("Embedding service is not enabled on the validator");
             output::info(
-                "Set EMBEDDING_ENABLED=true in docker-compose.standalone.yml and restart",
+                "Set EMBEDDING_ENABLED=true in .env.production and restart (validator auto-detects DMR/ollama at startup)",
             );
             return Ok(());
         }
@@ -707,9 +707,9 @@ async fn ask_streaming(resp: reqwest::Response, question: &str) -> Result<()> {
                         let msg = payload["message"].as_str().unwrap_or("Unknown error");
                         output::error(msg);
                         if msg.contains("Embedding service") {
-                            output::info("Set EMBEDDING_ENABLED=true in docker-compose.standalone.yml and restart");
+                            output::info("Set EMBEDDING_ENABLED=true in .env.production and restart (validator auto-detects DMR/ollama at startup)");
                         } else if msg.contains("Generation service") {
-                            output::info("Set GENERATION_ENABLED=true in docker-compose.standalone.yml and restart");
+                            output::info("Set GENERATION_ENABLED=true in .env.production and restart (validator auto-detects DMR/ollama at startup)");
                         }
                     }
                     return Ok(());
@@ -799,12 +799,12 @@ async fn ask_graphql(
         let msg = &errors[0].message;
         if msg.contains("Embedding service not available") || msg.contains("not enabled") {
             output::error("Embedding service is not enabled on the validator");
-            output::info("Set EMBEDDING_ENABLED=true in docker-compose.standalone.yml and restart");
+            output::info("Set EMBEDDING_ENABLED=true in .env.production and restart (validator auto-detects DMR/ollama at startup)");
             return Ok(());
         }
         if msg.contains("Generation service not available") {
             output::error("Generation service is not enabled on the validator");
-            output::info("Set GENERATION_ENABLED=true in docker-compose.standalone.yml and restart");
+            output::info("Set GENERATION_ENABLED=true in .env.production and restart (validator auto-detects DMR/ollama at startup)");
             return Ok(());
         }
         anyhow::bail!("GraphQL error: {}", msg);
