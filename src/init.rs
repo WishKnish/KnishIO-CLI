@@ -19,24 +19,37 @@ use crate::output;
 const PASSWORD_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Run the init workflow in the given project directory.
-pub async fn run(project_dir: &Path, generate_tls: bool, cors_origins: Option<&str>) -> Result<()> {
+///
+/// `force=true` regenerates `.env.production`, `knishio.toml`, and certs/
+/// (when `generate_tls=true`) even if they exist. `secrets/` is always
+/// preserved — for full regeneration, operator runs
+/// `rm -rf secrets/ && knishio init --force`.
+pub async fn run(
+    project_dir: &Path,
+    generate_tls: bool,
+    cors_origins: Option<&str>,
+    force: bool,
+) -> Result<()> {
     let validator_dir = find_validator_dir(project_dir)?;
 
     output::info("Initializing KnishIO production deployment...");
+    if force {
+        output::info("  --force: regenerating config files (secrets/ preserved)");
+    }
 
-    // 1. Generate secrets
+    // 1. Generate secrets (always preserved on re-run for safety)
     let secrets_dir = validator_dir.join("secrets");
     generate_secrets(&secrets_dir)?;
 
     // 2. Generate knishio.toml
-    generate_config(&validator_dir)?;
+    generate_config(&validator_dir, force)?;
 
     // 3. Generate .env.production
-    generate_env(&validator_dir, cors_origins)?;
+    generate_env(&validator_dir, cors_origins, force)?;
 
     // 4. Optionally generate TLS certs
     if generate_tls {
-        generate_tls_certs(&validator_dir).await?;
+        generate_tls_certs(&validator_dir, force).await?;
     } else {
         let certs_dir = validator_dir.join("certs");
         if !certs_dir.join("server.pem").exists() {
@@ -118,11 +131,11 @@ fn generate_secrets(secrets_dir: &Path) -> Result<()> {
 }
 
 /// Generate knishio.toml pointing to the production compose file.
-fn generate_config(validator_dir: &Path) -> Result<()> {
+fn generate_config(validator_dir: &Path, force: bool) -> Result<()> {
     let config_path = validator_dir.join("knishio.toml");
 
-    if config_path.exists() {
-        output::warn("knishio.toml already exists — skipping");
+    if config_path.exists() && !force {
+        output::warn("knishio.toml already exists — skipping (use --force to regenerate)");
         return Ok(());
     }
 
@@ -148,11 +161,11 @@ name = "knishio"
 }
 
 /// Generate .env.production from the example template.
-fn generate_env(validator_dir: &Path, cors_origins: Option<&str>) -> Result<()> {
+fn generate_env(validator_dir: &Path, cors_origins: Option<&str>, force: bool) -> Result<()> {
     let env_path = validator_dir.join(".env.production");
 
-    if env_path.exists() {
-        output::warn(".env.production already exists — skipping");
+    if env_path.exists() && !force {
+        output::warn(".env.production already exists — skipping (use --force to regenerate)");
         return Ok(());
     }
 
@@ -193,11 +206,16 @@ GENERATION_ENABLED=false
 }
 
 /// Generate self-signed TLS certificates using openssl.
-async fn generate_tls_certs(validator_dir: &Path) -> Result<()> {
+async fn generate_tls_certs(validator_dir: &Path, force: bool) -> Result<()> {
     let certs_dir = validator_dir.join("certs");
 
-    if certs_dir.join("server.pem").exists() && certs_dir.join("server-key.pem").exists() {
-        output::warn("TLS certificates already exist in certs/ — skipping");
+    if certs_dir.join("server.pem").exists()
+        && certs_dir.join("server-key.pem").exists()
+        && !force
+    {
+        output::warn(
+            "TLS certificates already exist in certs/ — skipping (use --force to regenerate)",
+        );
         return Ok(());
     }
 

@@ -48,17 +48,17 @@ async fn compose(files: &[PathBuf], args: &[&str], env: &[(&str, &str)]) -> Resu
         cmd.env(k, v);
     }
 
-    // Auto-detect env file if a production compose layer is present anywhere in
-    // the chain. Location: sibling to the first file's parent directory.
-    if files
-        .iter()
-        .any(|f| f.to_string_lossy().contains("production"))
-    {
-        if let Some(dir) = files[0].parent() {
-            let env_production = dir.join(".env.production");
-            if env_production.exists() {
-                cmd.arg("--env-file").arg(&env_production);
-            }
+    // R22 A.2: auto-detect .env.production whenever it exists in the validator
+    // dir, regardless of which compose layer is active. R19 Phase F made
+    // .env.production the canonical operator surface for env vars; it should
+    // drive `${VAR:-default}` interpolation in dmr.yml / standalone.yml /
+    // production.yml uniformly. Pre-fix this only fired when "production" was
+    // in the file path — defeating operator-set EMBEDDING_MODEL on the
+    // dmr-only stack.
+    if let Some(dir) = files[0].parent() {
+        let env_production = dir.join(".env.production");
+        if env_production.exists() {
+            cmd.arg("--env-file").arg(&env_production);
         }
     }
 

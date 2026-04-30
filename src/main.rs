@@ -138,6 +138,13 @@ enum Commands {
         /// Set CORS_ORIGINS in generated config
         #[arg(long)]
         cors: Option<String>,
+
+        /// Regenerate config files even if they already exist. Touches
+        /// .env.production, knishio.toml, and certs/ (when --tls is set).
+        /// Always preserves secrets/ — to regenerate secrets, run
+        /// `rm -rf secrets/ && knishio init --force` explicitly.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Start the validator stack (docker compose up)
@@ -658,8 +665,8 @@ async fn main() -> Result<()> {
         }
 
         // ── Init ────────────────────────────────────────────
-        Commands::Init { tls, cors } => {
-            init::run(&cwd, tls, cors.as_deref()).await?;
+        Commands::Init { tls, cors, force } => {
+            init::run(&cwd, tls, cors.as_deref(), force).await?;
         }
 
         // ── Docker control (all accel-aware) ────────────────

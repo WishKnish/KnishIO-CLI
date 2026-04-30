@@ -1,6 +1,6 @@
 [package]
 name = "knishio-cli"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "KnishIO validator orchestration CLI — Docker control, cell management, benchmarks, and health checks"
 license = "GPL-3.0-or-later"
