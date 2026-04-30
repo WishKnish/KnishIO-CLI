@@ -149,26 +149,15 @@ fn default_accel_map() -> HashMap<String, AccelProfile> {
             native_validator: true,
         },
     );
-    m.insert(
-        "rocm".into(),
-        AccelProfile {
-            files: vec![
-                "docker-compose.standalone.yml".into(),
-                "docker-compose.rocm.yml".into(),
-            ],
-            native_validator: false,
-        },
-    );
-    m.insert(
-        "vulkan".into(),
-        AccelProfile {
-            files: vec![
-                "docker-compose.standalone.yml".into(),
-                "docker-compose.vulkan.yml".into(),
-            ],
-            native_validator: false,
-        },
-    );
+    // R24 C.2: rocm + vulkan removed. The compose files
+    // (docker-compose.rocm.yml, docker-compose.vulkan.yml) don't exist in
+    // the validator repo — pre-R24 `knishio start --accel rocm` failed with
+    // a cryptic "compose file not found" error. The AccelFlag::Rocm/Vulkan
+    // and Accel::Rocm/Vulkan variants remain (clap parses them) but
+    // `cfg.accel_files()` returns an empty list, triggering the
+    // resolve_accel_and_files fallback path with a clear "no configured
+    // compose files; falling back to cpu" message. Restore these entries
+    // once docker-compose.rocm.yml + docker-compose.vulkan.yml ship.
     m
 }
 

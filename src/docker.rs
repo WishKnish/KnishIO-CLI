@@ -10,7 +10,57 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 use crate::config::Config;
+use crate::detect::Accel;
 use crate::output;
+
+/// R24 A: read the running validator container's compose-project labels and
+/// infer which accel profile it was started with. Returns `None` when no
+/// container exists or the label can't be matched.
+///
+/// Matches `com.docker.compose.project.config_files` (a comma-separated path
+/// list set by docker compose) against known stack overlays. Order matters:
+/// the more-specific overlay file determines the accel.
+///
+/// Used by `resolve_accel_and_files` so commands like `knishio destroy`
+/// without an explicit `--accel` correctly target the running stack instead
+/// of the operator's hardware default. Pre-R24 UX bug: after
+/// `knishio start --accel dmr`, a bare `knishio destroy` would re-detect
+/// `metal-native` from hardware and try to tear down the wrong overlay.
+pub fn detect_running_stack(_cwd: &Path) -> Option<Accel> {
+    use std::process::Command as SyncCommand;
+    let output = SyncCommand::new("docker")
+        .args([
+            "inspect",
+            "knishio-validator",
+            "--format",
+            "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let label = String::from_utf8(output.stdout).ok()?;
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+
+    // More-specific overlays first; standalone is the base layer present in
+    // every Docker stack so it must be checked LAST.
+    if label.contains("docker-compose.dmr.yml") {
+        Some(Accel::Dmr)
+    } else if label.contains("docker-compose.cuda.yml") {
+        Some(Accel::Cuda)
+    } else if label.contains("docker-compose.metal.yml") {
+        Some(Accel::MetalNative)
+    } else if label.contains("docker-compose.standalone.yml") {
+        Some(Accel::Cpu)
+    } else {
+        None
+    }
+}
 
 /// Run `docker compose -f <file1> [-f <file2>…] <args...>`, inheriting
 /// stdout/stderr. Auto-detects `.env.production` when a `docker-compose.production.yml`

@@ -969,22 +969,33 @@ fn resolve_accel_and_files(
     cli_accel: AccelFlag,
 ) -> Result<(Accel, Vec<PathBuf>)> {
     let (accel, source) = match cli_accel {
-        AccelFlag::Auto => match cfg.default_accel.as_deref() {
-            Some(name) => {
-                let a = parse_accel_name(name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "config `default_accel = \"{}\"` is not a known accel name",
-                        name
-                    )
-                })?;
-                (a, AccelSource::Config)
+        AccelFlag::Auto => {
+            // R24 A: prefer detection of the currently-running validator
+            // stack via its compose-project labels. Fixes the destroy/restart
+            // UX bug where hardware-based detection picked metal-native after
+            // a `start --accel dmr`. Only fires when something is running;
+            // falls through to config + hardware detection on a fresh init.
+            if let Some(running) = docker::detect_running_stack(cwd) {
+                (running, AccelSource::RunningStack)
+            } else {
+                match cfg.default_accel.as_deref() {
+                    Some(name) => {
+                        let a = parse_accel_name(name).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "config `default_accel = \"{}\"` is not a known accel name",
+                                name
+                            )
+                        })?;
+                        (a, AccelSource::Config)
+                    }
+                    None => {
+                        let env = detect::detect();
+                        detect::print_summary(&env);
+                        (env.accel, AccelSource::Auto)
+                    }
+                }
             }
-            None => {
-                let env = detect::detect();
-                detect::print_summary(&env);
-                (env.accel, AccelSource::Auto)
-            }
-        },
+        }
         explicit => (flag_to_accel(explicit), AccelSource::Explicit),
     };
 
@@ -1007,6 +1018,14 @@ fn resolve_accel_and_files(
             output::header("Environment");
             println!(
                 "{} Accel:   {}  (config default_accel; detection skipped)",
+                arrow,
+                accel
+            );
+        }
+        AccelSource::RunningStack => {
+            output::header("Environment");
+            println!(
+                "{} Accel:   {}  (detected from running validator container)",
                 arrow,
                 accel
             );
@@ -1098,6 +1117,8 @@ enum AccelSource {
     Auto,
     Explicit,
     Config,
+    /// R24 A: running validator container's compose-project label was the source.
+    RunningStack,
 }
 
 fn flag_to_accel(f: AccelFlag) -> Accel {

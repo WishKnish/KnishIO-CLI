@@ -103,13 +103,49 @@ pub async fn status(cfg: &Config) -> Result<()> {
     let parsed: AiStatusResponse = serde_json::from_str(&body)
         .with_context(|| format!("failed to parse /ai/status response: {}", body))?;
 
-    render(&parsed, &cfg.validator.url);
+    // R24 B: surface R20 Phase A nudge counters from the /metrics endpoint.
+    // Best-effort: if /metrics fails or doesn't expose the counters yet, we
+    // simply skip the section. Doesn't fail the overall status command.
+    let nudges = fetch_nudge_metrics(&client, &cfg.validator.url).await;
+
+    render(&parsed, &cfg.validator.url, &nudges);
     Ok(())
+}
+
+/// R24 B: minimal Prometheus text-format counter parse.
+///
+/// Each line is either a `# HELP …`/`# TYPE …` comment or `metric_name value`
+/// (or `metric_name{labels} value`). We only need exact-name matches for
+/// counters with no labels.
+fn parse_prom_counter(body: &str, name: &str) -> Option<u64> {
+    body.lines()
+        .find(|line| line.starts_with(name) && !line.starts_with('#'))
+        .and_then(|line| line.split_whitespace().last())
+        .and_then(|val| val.parse::<f64>().ok())
+        .map(|val| val as u64)
+}
+
+#[derive(Debug, Default)]
+struct NudgeMetrics {
+    nudges_received: Option<u64>,
+    fast_drain_wakes: Option<u64>,
+}
+
+async fn fetch_nudge_metrics(client: &reqwest::Client, base_url: &str) -> NudgeMetrics {
+    let url = format!("{}/metrics", base_url.trim_end_matches('/'));
+    let body = match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => resp.text().await.unwrap_or_default(),
+        _ => return NudgeMetrics::default(),
+    };
+    NudgeMetrics {
+        nudges_received: parse_prom_counter(&body, "knishio_embedding_nudges_received_total"),
+        fast_drain_wakes: parse_prom_counter(&body, "knishio_embedding_fast_drain_wakes_total"),
+    }
 }
 
 // ── Rendering ───────────────────────────────────────────────────────
 
-fn render(s: &AiStatusResponse, base_url: &str) {
+fn render(s: &AiStatusResponse, base_url: &str, nudges: &NudgeMetrics) {
     println!();
     println!(
         "{} {}",
@@ -223,6 +259,13 @@ fn render(s: &AiStatusResponse, base_url: &str) {
         _ => {
             row_info("backfill", "unavailable (embedding service disabled?)");
         }
+    }
+    // R24 B: surface R20 Phase A nudge counters when available.
+    if let Some(n) = nudges.nudges_received {
+        row("nudges", &format!("{} received", fmt_int(n as i64)));
+    }
+    if let Some(w) = nudges.fast_drain_wakes {
+        row("fast-drain", &format!("{} wakes from idle", fmt_int(w as i64)));
     }
     println!();
 
