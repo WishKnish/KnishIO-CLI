@@ -67,6 +67,7 @@
 //! ```
 
 mod ai;
+mod audit;
 mod backup;
 mod bench;
 mod cell;
@@ -78,7 +79,9 @@ mod embed;
 mod health;
 mod init;
 mod metrics;
+mod osmosis;
 mod output;
+mod p2p;
 mod package;
 mod paths;
 mod update;
@@ -302,6 +305,24 @@ enum Commands {
     Embed {
         #[command(subcommand)]
         command: EmbedCommands,
+    },
+
+    /// Query the validator's audit log (audit_events table)
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommands,
+    },
+
+    /// P2P observability (peer counts, top peers by reputation)
+    P2p {
+        #[command(subcommand)]
+        command: P2pCommands,
+    },
+
+    /// Osmosis pruning observability (last cycle, totals, queue depth)
+    Osmosis {
+        #[command(subcommand)]
+        command: OsmosisCommands,
     },
 
     /// Health check. Defaults to the liveness probe (GET /healthz);
@@ -749,6 +770,59 @@ enum EmbedCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum P2pCommands {
+    /// Show peer counts (active/suspended/banned/stale), top peers by
+    /// reputation, and the configured bootstrap list. Works against
+    /// any validator; returns "P2P disabled" when P2P_ENABLED=false.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum OsmosisCommands {
+    /// Show last-cycle pruning counts, lifetime totals, queue depth
+    /// estimate, and dry-run flag. Always available; reports "disabled"
+    /// when OSMOSIS_ENABLED=false at validator startup.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum AuditCommands {
+    /// List recent audit events (newest first). Filters compose; all
+    /// optional. Without filters, prints the most recent N events
+    /// (--limit, default 50).
+    List {
+        /// Match exact action (e.g. `cell.grant`, `molecule.reject`)
+        #[arg(long)]
+        action: Option<String>,
+
+        /// Match exact category (e.g. `auth`, `validation`, `lifecycle`)
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Match actor bundle hash (64-char lowercase hex)
+        #[arg(long)]
+        bundle: Option<String>,
+
+        /// Match cell slug
+        #[arg(long)]
+        cell: Option<String>,
+
+        /// Match severity (`info`, `warn`, `critical`)
+        #[arg(long)]
+        severity: Option<String>,
+
+        /// Filter to events newer than this. Accepts duration suffixes
+        /// (`30s`/`15m`/`2h`/`7d`) or bare Unix epoch seconds.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Maximum rows to return (1-500, default 50)
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════
@@ -1048,6 +1122,43 @@ async fn main() -> Result<()> {
                 meta_type,
             } => {
                 embed::ask(&cfg, &question, max_results, threshold, meta_type.as_deref()).await?;
+            }
+        },
+
+        // ── P2P observability ───────────────────────────────
+        Commands::P2p { command } => match command {
+            P2pCommands::Status => p2p::status(&cfg).await?,
+        },
+
+        // ── Osmosis pruning observability ───────────────────
+        Commands::Osmosis { command } => match command {
+            OsmosisCommands::Status => osmosis::status(&cfg).await?,
+        },
+
+        // ── Audit log queries ───────────────────────────────
+        Commands::Audit { command } => match command {
+            AuditCommands::List {
+                action,
+                category,
+                bundle,
+                cell,
+                severity,
+                since,
+                limit,
+            } => {
+                audit::list(
+                    &cfg,
+                    audit::ListFilters {
+                        action,
+                        category,
+                        bundle,
+                        cell,
+                        severity,
+                        since,
+                        limit,
+                    },
+                )
+                .await?;
             }
         },
 

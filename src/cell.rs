@@ -16,7 +16,7 @@ const VALID_STATUSES: &[&str] = &["active", "paused", "archived"];
 pub const VALID_MODES: &[&str] = &["open", "permissioned", "private"];
 pub const BENCH_PREFIX: &str = "BENCH_CLI_";
 
-fn validate_slug(slug: &str) -> Result<()> {
+pub(crate) fn validate_slug(slug: &str) -> Result<()> {
     if slug.is_empty() || slug.len() > SLUG_MAX_LEN {
         anyhow::bail!("Slug must be 1-{} characters", SLUG_MAX_LEN);
     }
@@ -63,7 +63,7 @@ fn validate_mode(mode: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_bundle(bundle: &str) -> Result<()> {
+pub(crate) fn validate_bundle(bundle: &str) -> Result<()> {
     if bundle.len() != BUNDLE_LEN {
         anyhow::bail!(
             "Bundle hash must be exactly {} characters, got {}",

@@ -447,12 +447,29 @@ knishio status
 
 Manage cells (application-specific sub-ledgers) in the validator's database. Commands execute SQL via `docker exec` into the `knishio-postgres` container.
 
+Cells have two orthogonal axes of control:
+
+- **Status** (`active` / `paused` / `archived`) — lifecycle state. Paused cells reject all proposed molecules; archived cells are soft-deleted.
+- **Access mode (ABAC)** — bundle-level access control layered on top of status. Three modes:
+
+| Mode | Who may submit molecules | Typical use |
+|------|--------------------------|-------------|
+| `open` | Any bundle (no allowlist) | Default; public sandboxes, dev cells |
+| `permissioned` | Only bundles in `authorized_bundles` | Curated cohorts, partner programs |
+| `private` | Only bundles in `admin_bundles` | Locked-down internal cells, ops tooling |
+
+Bundle hashes used in `--authorize` / `--admin` and in the grant/admin subcommands must be **64-char lowercase hexadecimal**. The validator does string equality on these — case-mismatch and length-mismatch silently break enforcement, so the CLI validates strictly client-side.
+
 ### cell create
 
-Create a new cell or update an existing one.
+Create a new cell or update an existing one. Optionally seed ABAC mode + bundle lists in the same call.
 
 ```bash
-knishio cell create <SLUG> [--name <NAME>] [--status <STATUS>]
+knishio cell create <SLUG> \
+  [--name <NAME>] [--status <STATUS>] \
+  [--mode open|permissioned|private] \
+  [--authorize <BUNDLE>]... \
+  [--admin <BUNDLE>]...
 ```
 
 | Argument/Flag | Description | Default |
@@ -460,13 +477,26 @@ knishio cell create <SLUG> [--name <NAME>] [--status <STATUS>]
 | `<SLUG>` | Cell slug identifier (required) | — |
 | `--name` | Human-readable display name | Same as slug |
 | `--status` | Initial status | `active` |
+| `--mode` | ABAC access mode | `open` |
+| `--authorize` | Bundle to add to `authorized_bundles` (repeatable) | none |
+| `--admin` | Bundle to add to `admin_bundles` (repeatable) | none |
 
 ```bash
+# Open cell (default — anyone may submit)
 knishio cell create TESTCELL --name "Test Cell"
-knishio cell create PROD --name "Production" --status active
+
+# Permissioned cell with a starter cohort
+knishio cell create partner-pilot --mode permissioned \
+  --authorize 9a2411f2af1a801a1e4262e74a743eb5ef6ef0dccf3826851f7d861d51fd41d4 \
+  --authorize 8b1322e3be0b912c2f5373f85b854fc6f07e1edddb4937962a8e972e62ce52e5
+
+# Private cell with an admin pair
+knishio cell create ops-only --mode private \
+  --admin 9a2411f2af1a801a1e4262e74a743eb5ef6ef0dccf3826851f7d861d51fd41d4 \
+  --admin 8b1322e3be0b912c2f5373f85b854fc6f07e1edddb4937962a8e972e62ce52e5
 ```
 
-If the slug already exists, the cell's name and status are updated (upsert).
+If the slug already exists, the cell's name and status are updated (upsert). The `--mode`/`--authorize`/`--admin` flags additively layer ABAC seed data — to switch an existing cell's mode in isolation, use `cell set-mode` instead.
 
 #### Validation Rules
 
@@ -475,6 +505,8 @@ If the slug already exists, the cell's name and status are updated (upsert).
 | Slug | 1-64 characters, alphanumeric + dashes + underscores only (`[a-zA-Z0-9_-]`) |
 | Name | 1-256 characters, no null bytes or control characters |
 | Status | Must be one of: `active`, `paused`, `archived` |
+| Mode | Must be one of: `open`, `permissioned`, `private` (case-sensitive) |
+| Bundle hash | Exactly 64 lowercase hexadecimal characters (`[0-9a-f]{64}`) |
 
 Invalid input is rejected before any database operation runs.
 
@@ -495,9 +527,87 @@ public               Public Cell                    active       1773423688
 TESTCELL             Test Cell                      active       1773423694
 ```
 
+### cell show
+
+Show full cell record including ABAC state.
+
+```bash
+knishio cell show <SLUG>
+```
+
+Output includes the access mode, the contents of `authorized_bundles` and `admin_bundles`, and the cell's lifecycle counters. Use this after `set-mode` / `grant` / `add-admin` to confirm the change landed.
+
+### cell set-mode
+
+Switch an existing cell's ABAC access mode. Initializes empty `authorized_bundles` / `admin_bundles` lists if they don't already exist.
+
+```bash
+knishio cell set-mode <SLUG> <MODE>
+```
+
+```bash
+# Lock down a previously-open cell
+knishio cell set-mode partner-pilot permissioned
+
+# Tighten further
+knishio cell set-mode partner-pilot private
+```
+
+> **Heads-up:** tightening to `permissioned` or `private` with empty bundle lists bricks the cell — molecule proposals will reject until at least one bundle is granted. The CLI prints a warn line in this case.
+
+### cell grant
+
+Authorize a bundle to submit molecules to a `permissioned` cell. Adds the bundle to `authorized_bundles` (idempotent — a re-grant is a no-op).
+
+```bash
+knishio cell grant <SLUG> <BUNDLE>
+knishio cell grant <SLUG> --from-file <PATH>
+```
+
+The `--from-file` form bulk-onboards a file with one bundle per line. Comments (lines starting with `#`) and blank lines are ignored. The CLI **pre-validates every line before applying any** — a malformed bundle on line 47 of a 50-line file aborts the whole batch, leaving the cell unmodified. Already-granted bundles are no-ops, so partial-then-resumed runs are safe.
+
+```bash
+# One-off
+knishio cell grant partner-pilot 9a2411f2af1a801a1e4262e74a743eb5ef6ef0dccf3826851f7d861d51fd41d4
+
+# Bulk from a file
+knishio cell grant partner-pilot --from-file partner-cohort.txt
+```
+
+### cell revoke
+
+Remove a bundle from a permissioned cell's `authorized_bundles`.
+
+```bash
+knishio cell revoke <SLUG> <BUNDLE>
+```
+
+Idempotent — revoking a bundle that wasn't authorized prints an info line and exits cleanly.
+
+### cell add-admin
+
+Grant admin rights on a `private` cell. Adds the bundle to `admin_bundles` (idempotent).
+
+```bash
+knishio cell add-admin <SLUG> <BUNDLE>
+knishio cell add-admin <SLUG> --from-file <PATH>
+```
+
+Same `--from-file` semantics as `cell grant` (one bundle per line, `#` comments allowed, fail-fast pre-validation, idempotent application).
+
+### cell remove-admin
+
+Revoke a bundle's admin rights on a private cell.
+
+```bash
+knishio cell remove-admin <SLUG> <BUNDLE>
+```
+
+Idempotent — removing a bundle that wasn't an admin prints an info line and exits cleanly.
+
 ### cell activate / pause / archive
 
-Change a cell's status.
+Change a cell's status (orthogonal to ABAC mode).
 
 ```bash
 knishio cell activate <SLUG>
@@ -972,6 +1082,109 @@ knishio watch dag
 
 Uses the modern `graphql-transport-ws` subprotocol over WSS. Self-signed certificates are accepted when `insecure_tls = true` is set in config.
 
+## Subsystem Status
+
+Diagnostic surfaces that report the live state of the validator's optional background subsystems. All read-only; safe to call from any operator workflow. The corresponding HTTP endpoints (`/p2p/status`, `/osmosis/status`, `/ai/status`) skip rate-limiting + auth, matching the existing `/readyz` posture — firewall the validator's port externally if you don't want these surfaces exposed beyond the operator network.
+
+### audit list
+
+Query the validator's `audit_events` table without remembering the column shape. Filters compose; all are optional. Without filters, prints the most recent N events (newest first).
+
+```bash
+knishio audit list \
+  [--action <STR>] [--category <STR>] \
+  [--bundle <HEX>] [--cell <SLUG>] \
+  [--severity info|warn|critical] \
+  [--since 30s|15m|2h|7d] \
+  [--limit 50]
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--action` | Match exact action (e.g. `cell.grant`, `molecule.reject`) | — |
+| `--category` | Match exact category (e.g. `auth`, `validation`, `lifecycle`) | — |
+| `--bundle` | Match `actor_bundle`. Pre-validated as 64-char lowercase hex. | — |
+| `--cell` | Match `cell_slug` | — |
+| `--severity` | Match `severity` (`info` / `warn` / `critical`) | — |
+| `--since` | Filter to events newer than this. Duration suffixes (`30s`/`15m`/`2h`/`7d`) or bare epoch seconds. | — |
+| `--limit` | Maximum rows (1-500) | 50 |
+
+```bash
+# Show last 20 events from the last hour
+knishio audit list --since 1h --limit 20
+
+# All cell-grant events for one cell over the past day
+knishio audit list --action cell.grant --cell ops-only --since 24h
+
+# Recent rejections at warn-or-critical severity
+knishio audit list --severity warn --since 7d
+```
+
+Output is a table sorted newest-first with columns: AGE (relative), SEVERITY (color-coded), CATEGORY, ACTION, CELL, BUNDLE, TARGET. Bundle and target columns are truncated for tabular display — use `knishio psql -c "SELECT * FROM audit_events WHERE id=…"` for the full row.
+
+The CLI shells out to `docker exec … psql` against the postgres container; the validator does not need to expose audit data over HTTP for this to work.
+
+### p2p status
+
+Snapshot of the validator's P2P subsystem. Reports peer counts grouped by status (`active` / `suspended` / `banned` / `stale`), top peers by reputation, and the configured `bootstrap_peers` list.
+
+```bash
+knishio p2p status
+```
+
+When `P2P_ENABLED=false` at validator startup, prints "P2P disabled" + the configured (but unused) self-host and bootstrap list. When enabled, an example output:
+
+```
+P2P Status
+  Self host:        http://validator-1:8080
+  Bootstrap peers:  2
+
+Peer Counts
+  active:   12  stale:    3
+  suspended: 0  banned:   1
+  total:    16
+
+Top 10 peers by reputation
+HOST                                     STATUS     REP        VALID    INVALID  LATENCY    LAST_SEEN
+--------------------------------------------------------------------------------------------------------------
+http://validator-2:8080                  active     0.95       4823     12       18.4ms     12s ago
+http://validator-3:8080                  active     0.91       4127     8        21.0ms     45s ago
+…
+```
+
+Hits `GET /p2p/status` on the validator. The endpoint skips rate-limiting (matches `/readyz` posture); add network-level firewalling if you don't want it externally reachable.
+
+### osmosis status
+
+Snapshot of the Osmosis pruning worker. Reports last-cycle pruned counts, lifetime totals, and the dry-run flag.
+
+```bash
+knishio osmosis status
+```
+
+When `OSMOSIS_ENABLED=false`, reports "Osmosis disabled" + the configured retention and interval (so operators can verify env-var rendering before flipping enabled=true). When enabled:
+
+```
+Osmosis Pruning Status
+  Mode:               live
+  Retention:          90d
+  Interval:           3600s
+  Last run:           1762553625 (12m ago)
+  Cycles completed:   145
+
+Last Cycle
+  Rejected pruned:    47
+  Accepted pruned:    0
+
+Lifetime Totals
+  Rejected pruned:    8.4K
+  Accepted pruned:    0
+```
+
+When `OSMOSIS_DRY_RUN=true`, the "Last Cycle / Accepted pruned" line is annotated `(dry-run — not actually deleted)` and a warn footer points at the env var to flip live. Dry-run is the recommended posture for first deploys; observe the counts for a few cycles, then flip live.
+
+Hits `GET /osmosis/status`. Same rate-limit / auth posture as `/p2p/status`.
+
 ## Packaging
 
 ### package
@@ -1136,6 +1349,33 @@ knishio embed status
 
 # Semantic search
 knishio embed search "user profile"
+```
+
+### Locked-down cell (ABAC)
+
+End-to-end "private cell with an ops-team allowlist":
+
+```bash
+# Create a private cell with two initial admins
+knishio cell create ops-only --mode private \
+  --admin 9a2411f2af1a801a1e4262e74a743eb5ef6ef0dccf3826851f7d861d51fd41d4 \
+  --admin 8b1322e3be0b912c2f5373f85b854fc6f07e1edddb4937962a8e972e62ce52e5
+
+# Confirm mode + admin list landed
+knishio cell show ops-only
+
+# Bulk-onboard a wider ops cohort (one bundle per line; '#' comments OK)
+knishio cell add-admin ops-only --from-file ops-team.txt
+
+# Verify count grew
+knishio cell show ops-only
+
+# Later: remove a departing admin
+knishio cell remove-admin ops-only 9a2411f2af1a801a1e4262e74a743eb5ef6ef0dccf3826851f7d861d51fd41d4
+
+# Or relax to permissioned and migrate everyone to authorized list
+knishio cell set-mode ops-only permissioned
+knishio cell grant ops-only --from-file all-authorized.txt
 ```
 
 ## Output Symbols
