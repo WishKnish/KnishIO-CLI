@@ -145,6 +145,69 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Authoritative coherence verdict from the validator's `/readyz` body.
+/// The validator runs `EmbeddingService::check_schema_coherence` at startup
+/// and caches the verdict; we read its decision rather than recomputing.
+///
+/// Three states:
+/// - `Active(coherent, strict)` — embedding service registered; `coherent`
+///   is the runtime verdict, `strict` reflects EMBEDDING_COHERENCE_BLOCKS_READY.
+/// - `NoEmbeddingService` — `/readyz` reachable, but `embedding_coherent`
+///   is null (validator booted with EMBEDDING_ENABLED=false).
+/// - `Unreachable` — couldn't fetch `/readyz`.
+enum CoherenceVerdict {
+    Active(bool, bool),
+    NoEmbeddingService,
+    Unreachable,
+}
+
+/// Fetch `/readyz` and extract the coherence verdict + strict flag.
+/// Treats any error (network, parse, missing fields) as `Unreachable`.
+async fn fetch_readyz_coherence(config: &Config) -> CoherenceVerdict {
+    #[derive(Deserialize)]
+    struct ReadyzBody {
+        embedding_coherent: Option<bool>,
+        embedding_strict: Option<bool>,
+    }
+
+    let url = format!("{}/readyz", config.validator.url);
+    let client = match http_client(config.validator.insecure_tls) {
+        Ok(c) => c,
+        Err(_) => return CoherenceVerdict::Unreachable,
+    };
+    let body: ReadyzBody = match client.get(&url).send().await {
+        Ok(r) => match r.json().await {
+            Ok(b) => b,
+            Err(_) => return CoherenceVerdict::Unreachable,
+        },
+        Err(_) => return CoherenceVerdict::Unreachable,
+    };
+    match body.embedding_coherent {
+        Some(coherent) => CoherenceVerdict::Active(coherent, body.embedding_strict.unwrap_or(true)),
+        None => CoherenceVerdict::NoEmbeddingService,
+    }
+}
+
+/// Extract the `N` from the first `halfvec(N)` or `vector(N)` substring.
+/// Used by `status` to read the dim baked into the HNSW index definition
+/// returned by `pg_get_indexdef()`.
+///
+/// Accepts both cast targets: `halfvec(N)` (current >2000d migrations) and
+/// plain `vector(N)` (sub-2000d migrations where halfvec offers no benefit).
+fn parse_index_dim(idx_def: &str) -> Option<usize> {
+    for prefix in &["halfvec(", "vector("] {
+        if let Some(start) = idx_def.find(prefix) {
+            let after = &idx_def[start + prefix.len()..];
+            if let Some(end) = after.find(')') {
+                if let Ok(n) = after[..end].trim().parse() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
 // ── Commands ───────────────────────────────────────────────────
 
 /// Show embedding coverage and model statistics.
@@ -243,6 +306,76 @@ pub async fn status(config: &Config) -> Result<()> {
                 "{} embeddings from stale models — run `knishio embed reset` to clear them",
                 stale_count
             ));
+        }
+    }
+
+    // Schema dim — parse halfvec(N) out of idx_metas_embedding_hnsw to surface
+    // schema-vs-config mismatches that would cause `pgvector "expected N
+    // dimensions, not M"` errors at search time.
+    let idx_def = psql(
+        config,
+        "SELECT pg_get_indexdef(indexrelid) FROM pg_index \
+         WHERE indexrelid::regclass::text = 'idx_metas_embedding_hnsw'",
+    )
+    .await
+    .unwrap_or_default();
+
+    if let Some(schema_dim) = parse_index_dim(&idx_def) {
+        println!();
+        output::header("Schema");
+
+        // Authoritative verdict from /readyz. The validator computes
+        // coherence by comparing schema_dim against the runtime
+        // provider.dimensions() — the canonical signal — so we defer to
+        // its decision instead of recomputing locally (which would only
+        // work when EMBEDDING_DIMENSIONS is explicitly set, missing the
+        // common native-dim case).
+        let verdict = fetch_readyz_coherence(config).await;
+
+        match verdict {
+            CoherenceVerdict::Active(false, strict) => {
+                let mode = if strict { "strict" } else { "lenient" };
+                println!(
+                    "  Schema dim:  {}  {}",
+                    format!("{}d (HNSW index)", schema_dim).red(),
+                    format!("MISMATCH ({})", mode).red()
+                );
+                let strict_note = if strict {
+                    "/readyz returns 503 — operators block traffic at the load balancer"
+                } else {
+                    "/readyz still 200 (EMBEDDING_COHERENCE_BLOCKS_READY=false), but search will fail at runtime"
+                };
+                output::warn(&format!(
+                    "Coherence verdict from /readyz: MISMATCH. {}\n\
+                     Schema expects {}d but the active embedding provider produces a different dim. \
+                     Remediate by adding a new migration that rebuilds idx_metas_embedding_hnsw and \
+                     search_metas_semantic at the provider's native dim. Canonical pattern: \
+                     migrations/20260507000001_hnsw_functional_index_1024.sql",
+                    strict_note, schema_dim
+                ));
+            }
+            CoherenceVerdict::Active(true, strict) => {
+                let mode = if strict { "strict" } else { "lenient" };
+                println!(
+                    "  Schema dim:  {}d (HNSW index)  {}",
+                    schema_dim,
+                    format!("✓ aligned ({})", mode).green()
+                );
+            }
+            CoherenceVerdict::NoEmbeddingService => {
+                println!(
+                    "  Schema dim:  {}d (HNSW index)  {}",
+                    schema_dim,
+                    "(embedding service disabled)".dimmed()
+                );
+            }
+            CoherenceVerdict::Unreachable => {
+                println!(
+                    "  Schema dim:  {}d (HNSW index)  {}",
+                    schema_dim,
+                    "(/readyz unreachable — verdict unavailable)".yellow()
+                );
+            }
         }
     }
 
@@ -442,7 +575,7 @@ pub async fn search(
         {
             anyhow::anyhow!(
                 "TLS error: {}\n\
-                 Hint: set insecure_tls = true in knishio.toml or KNISHIO_INSECURE_TLS=true",
+                 Hint: pass --insecure, set insecure_tls = true in knishio.toml, or export KNISHIO_INSECURE_TLS=true",
                 e
             )
         } else {
@@ -465,9 +598,23 @@ pub async fn search(
             );
             return Ok(());
         }
-        if msg.contains("different vector dimensions") {
-            output::error(&format!("Dimension mismatch: {}", msg));
-            output::info("Run `knishio embed reset` to clear stale embeddings, then retry");
+        // pgvector emits "expected N dimensions, not M" for cast mismatches
+        // and (in older versions) "different vector dimensions" for direct
+        // operator comparisons. Match both so the friendly remediation hint
+        // actually fires regardless of which path raised.
+        if msg.contains("different vector dimensions")
+            || (msg.contains("expected") && msg.contains("dimensions, not"))
+        {
+            output::error(&format!("Embedding dimension mismatch: {}", msg));
+            output::info(
+                "The HNSW index / search function dimension does not match the active model.\n\
+                 Run `knishio embed status` to inspect schema-vs-config dim, then either:\n\
+                 (a) ship a new migration rebuilding idx_metas_embedding_hnsw and\n\
+                     search_metas_semantic at the new dim (canonical pattern:\n\
+                     migrations/20260507000001_hnsw_functional_index_1024.sql), or\n\
+                 (b) revert EMBEDDING_MODEL to a model whose native dim matches the\n\
+                     current schema and `knishio rebuild`.",
+            );
             return Ok(());
         }
         anyhow::bail!("GraphQL error: {}", msg);
@@ -575,7 +722,7 @@ pub async fn ask(
             {
                 anyhow::bail!(
                     "TLS error: {}\n\
-                     Hint: set insecure_tls = true in knishio.toml or KNISHIO_INSECURE_TLS=true",
+                     Hint: pass --insecure, set insecure_tls = true in knishio.toml, or export KNISHIO_INSECURE_TLS=true",
                     e
                 );
             }
@@ -780,7 +927,7 @@ async fn ask_graphql(
         {
             anyhow::anyhow!(
                 "TLS error: {}\n\
-                 Hint: set insecure_tls = true in knishio.toml or KNISHIO_INSECURE_TLS=true",
+                 Hint: pass --insecure, set insecure_tls = true in knishio.toml, or export KNISHIO_INSECURE_TLS=true",
                 e
             )
         } else {
@@ -888,4 +1035,29 @@ struct AskDagSource {
     value: String,
     similarity: f32,
     molecular_hash: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_index_dim_extracts_halfvec() {
+        let def = "USING hnsw ((embedding::halfvec(1024)) halfvec_cosine_ops)";
+        assert_eq!(parse_index_dim(def), Some(1024));
+    }
+
+    #[test]
+    fn parse_index_dim_extracts_plain_vector() {
+        // Sub-2000d migrations may use vector(N) since pgvector's HNSW
+        // supports it natively without halfvec.
+        let def = "USING hnsw ((embedding::vector(384)) vector_cosine_ops)";
+        assert_eq!(parse_index_dim(def), Some(384));
+    }
+
+    #[test]
+    fn parse_index_dim_returns_none_when_no_cast() {
+        let def = "CREATE INDEX idx_metas_pk ON public.metas USING btree (id)";
+        assert_eq!(parse_index_dim(def), None);
+    }
 }
