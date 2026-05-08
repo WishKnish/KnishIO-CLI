@@ -147,6 +147,11 @@ For production, `knishio init` generates a `knishio.toml` that points to `docker
 
 ```
 --url <URL>       Validator base URL for health commands [default: https://localhost:8080]
+--insecure        Accept self-signed TLS certs (per-call override of
+                  validator.insecure_tls in knishio.toml). Mirrors
+                  curl's `-k`: server keeps running HTTPS as always;
+                  this just tells the CLI HTTP client to skip cert
+                  verification for THIS invocation.
 --accel <ACCEL>   Hardware acceleration profile
                   [default: auto]
                   [possible values: auto, cpu, cuda, dmr, metal-native, rocm, vulkan]
@@ -154,7 +159,7 @@ For production, `knishio init` generates a `knishio.toml` that points to `docker
 -V, --version     Print version
 ```
 
-`--url` applies to `health`, `ready`, `full`, and `db`. TLS certificates are validated by default; set `insecure_tls = true` in `knishio.toml` or `KNISHIO_INSECURE_TLS=true` for self-signed local certs. Health requests have a 30-second timeout.
+`--url` applies to `health`, `ready`, `full`, and `db`. TLS certificates are validated by default; pass `--insecure`, set `insecure_tls = true` in `knishio.toml`, or export `KNISHIO_INSECURE_TLS=true` for self-signed local certs. Health requests have a 30-second timeout.
 
 `--accel auto` (default) auto-detects the host; any other value forces a specific stack and skips detection. See [Hardware Acceleration](#hardware-acceleration) for the full decision table.
 

@@ -268,7 +268,7 @@ fn friendly_net_error(e: reqwest::Error) -> anyhow::Error {
     {
         anyhow::anyhow!(
             "TLS certificate error: {}\n\
-             Hint: set insecure_tls = true in knishio.toml or KNISHIO_INSECURE_TLS=true for self-signed certs",
+             Hint: pass --insecure, set insecure_tls = true in knishio.toml, or export KNISHIO_INSECURE_TLS=true for self-signed certs",
             e
         )
     } else {

@@ -108,6 +108,15 @@ struct Cli {
     #[arg(long, global = true, default_value = "https://localhost:8080")]
     url: String,
 
+    /// Accept self-signed TLS certs from the validator. Mirrors curl's
+    /// `--insecure`: the *server* keeps running HTTPS as always; this flag
+    /// just tells the CLI HTTP client to skip cert verification for THIS
+    /// invocation (overrides `[validator] insecure_tls = false` in
+    /// knishio.toml on a per-call basis). Useful for prod-like configs where
+    /// insecure_tls is normally off but you need a one-off cert-skip.
+    #[arg(long, global = true)]
+    insecure: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -446,10 +455,84 @@ enum CellCommands {
         /// Initial status
         #[arg(long, default_value = "active")]
         status: String,
+
+        /// Initial ABAC access mode
+        #[arg(long, value_enum, default_value_t = AccessMode::Open)]
+        mode: AccessMode,
+
+        /// Bundle hash to authorize (permissioned mode); repeatable
+        #[arg(long, value_name = "BUNDLE")]
+        authorize: Vec<String>,
+
+        /// Bundle hash to grant admin (private mode); repeatable
+        #[arg(long, value_name = "BUNDLE")]
+        admin: Vec<String>,
     },
 
     /// List all cells
     List,
+
+    /// Show full cell record including ABAC access state
+    Show {
+        /// Cell slug
+        slug: String,
+    },
+
+    /// Set the cell's ABAC access mode (initializes empty bundle lists if absent)
+    SetMode {
+        /// Cell slug
+        slug: String,
+
+        /// New access mode
+        #[arg(value_enum)]
+        mode: AccessMode,
+    },
+
+    /// Authorize a bundle for a permissioned cell
+    Grant {
+        /// Cell slug
+        slug: String,
+
+        /// Bundle hash (64 lowercase hex characters); omit when using --from-file
+        #[arg(required_unless_present = "from_file")]
+        bundle: Option<String>,
+
+        /// Read bundle hashes from file (one per line; '#' comments and blanks skipped)
+        #[arg(long, value_name = "PATH", conflicts_with = "bundle")]
+        from_file: Option<std::path::PathBuf>,
+    },
+
+    /// Remove a bundle from a permissioned cell's authorized list
+    Revoke {
+        /// Cell slug
+        slug: String,
+
+        /// Bundle hash
+        bundle: String,
+    },
+
+    /// Add a bundle to a private cell's admin list
+    AddAdmin {
+        /// Cell slug
+        slug: String,
+
+        /// Bundle hash (64 lowercase hex characters); omit when using --from-file
+        #[arg(required_unless_present = "from_file")]
+        bundle: Option<String>,
+
+        /// Read bundle hashes from file (one per line; '#' comments and blanks skipped)
+        #[arg(long, value_name = "PATH", conflicts_with = "bundle")]
+        from_file: Option<std::path::PathBuf>,
+    },
+
+    /// Remove a bundle from a private cell's admin list
+    RemoveAdmin {
+        /// Cell slug
+        slug: String,
+
+        /// Bundle hash
+        bundle: String,
+    },
 
     /// Activate a cell
     Activate {
@@ -468,6 +551,27 @@ enum CellCommands {
         /// Cell slug
         slug: String,
     },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[value(rename_all = "lowercase")]
+enum AccessMode {
+    /// Any bundle may submit (default)
+    Open,
+    /// Only bundles in `authorized_bundles` may submit
+    Permissioned,
+    /// Only bundles in `admin_bundles` may submit
+    Private,
+}
+
+impl AccessMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AccessMode::Open => "open",
+            AccessMode::Permissioned => "permissioned",
+            AccessMode::Private => "private",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -655,7 +759,14 @@ async fn main() -> Result<()> {
     let cwd = env::current_dir()?;
 
     // Load config: file -> env vars -> CLI flags
-    let cfg = config::Config::load(&cwd).with_url_override(&cli.url);
+    let mut cfg = config::Config::load(&cwd).with_url_override(&cli.url);
+
+    // `--insecure` is a per-invocation override of `[validator] insecure_tls`.
+    // Mirrors curl's `-k`: server keeps running HTTPS as always; this just
+    // tells the CLI HTTP client to skip cert verification for THIS run.
+    if cli.insecure {
+        cfg.validator.insecure_tls = true;
+    }
 
     match cli.command {
         // ── Detect (no docker dispatch) ─────────────────────
@@ -755,11 +866,49 @@ async fn main() -> Result<()> {
 
         // ── Cell management ─────────────────────────────────
         Commands::Cell { command } => match command {
-            CellCommands::Create { slug, name, status } => {
+            CellCommands::Create { slug, name, status, mode, authorize, admin } => {
                 cell::create(&cfg, &slug, name.as_deref(), &status).await?;
+                // Seed access state if any non-default flag was supplied.
+                if mode.as_str() != "open" || !authorize.is_empty() || !admin.is_empty() {
+                    cell::set_mode(&cfg, &slug, mode.as_str()).await?;
+                    for bundle in &authorize {
+                        cell::grant(&cfg, &slug, bundle).await?;
+                    }
+                    for bundle in &admin {
+                        cell::add_admin(&cfg, &slug, bundle).await?;
+                    }
+                }
             }
             CellCommands::List => {
                 cell::list(&cfg).await?;
+            }
+            CellCommands::Show { slug } => {
+                cell::show(&cfg, &slug).await?;
+            }
+            CellCommands::SetMode { slug, mode } => {
+                cell::set_mode(&cfg, &slug, mode.as_str()).await?;
+            }
+            CellCommands::Grant { slug, bundle, from_file } => {
+                match (bundle, from_file) {
+                    (Some(b), None) => cell::grant(&cfg, &slug, &b).await?,
+                    (None, Some(p)) => cell::grant_from_file(&cfg, &slug, &p).await?,
+                    (None, None) => unreachable!("clap required_unless_present"),
+                    (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
+                }
+            }
+            CellCommands::Revoke { slug, bundle } => {
+                cell::revoke(&cfg, &slug, &bundle).await?;
+            }
+            CellCommands::AddAdmin { slug, bundle, from_file } => {
+                match (bundle, from_file) {
+                    (Some(b), None) => cell::add_admin(&cfg, &slug, &b).await?,
+                    (None, Some(p)) => cell::add_admin_from_file(&cfg, &slug, &p).await?,
+                    (None, None) => unreachable!("clap required_unless_present"),
+                    (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
+                }
+            }
+            CellCommands::RemoveAdmin { slug, bundle } => {
+                cell::remove_admin(&cfg, &slug, &bundle).await?;
             }
             CellCommands::Activate { slug } => {
                 cell::set_status(&cfg, &slug, "active").await?;

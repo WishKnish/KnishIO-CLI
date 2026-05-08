@@ -334,7 +334,7 @@ fn friendly_net_error(e: reqwest::Error) -> anyhow::Error {
     if s.contains("certificate") || s.contains("tls") || s.contains("handshake") {
         anyhow::anyhow!(
             "TLS error hitting /ai/status: {}\n\
-             Hint: set insecure_tls = true in knishio.toml or KNISHIO_INSECURE_TLS=true \
+             Hint: pass --insecure, set insecure_tls = true in knishio.toml, or export KNISHIO_INSECURE_TLS=true \
              for self-signed dev certs",
             e
         )
