@@ -98,7 +98,18 @@ The CLI uses a layered configuration system. Values are resolved in this order (
 
 ### Config File
 
-Place a `knishio.toml` anywhere in the project tree — the CLI walks up from your current directory to find it.
+The CLI loads configuration from a `knishio.toml` walked up from your current directory. The repo ships a `knishio.toml.example` template at `servers/knishio-validator-rust/knishio.toml.example` with sane standalone-development defaults — **copy it to `knishio.toml`** (or generate fresh via `knishio init`) before running stack commands. The runtime `knishio.toml` is gitignored: it's per-deploy operator state, not source — edit freely without worrying about leaking your local settings to version control.
+
+```bash
+# First-time setup, two equivalent paths:
+
+# Option A: copy the template (preserves committed defaults)
+cp servers/knishio-validator-rust/knishio.toml.example \
+   servers/knishio-validator-rust/knishio.toml
+
+# Option B: generate from scratch (interactive prompts for TLS + CORS)
+knishio init
+```
 
 ```toml
 # Optional: pin an accel and skip auto-detection every invocation
@@ -129,7 +140,7 @@ user = "knishio"
 name = "knishio"
 ```
 
-For production, `knishio init` generates a `knishio.toml` that points to `docker-compose.production.yml` instead.
+For production, `knishio init` generates a `knishio.toml` that points to `docker-compose.production.yml` instead of the standalone shape shown above. The `knishio.toml.example` template tracks the standalone-development defaults.
 
 ### Environment Variables
 
