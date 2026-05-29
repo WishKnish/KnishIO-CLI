@@ -11,15 +11,15 @@
 //! Ctrl-C sends a graceful `complete` + closes the socket cleanly so
 //! the server-side subscription isn't left dangling.
 //!
-//! Two subjects in this first pass:
+//! Two subjects:
 //!   * `embeddings` — DataBraid embedding-pipeline events
-//!     (`embeddingChanges` subscription; broadcast, no Supabase).
-//!   * `dag` — DAG structure events (`dagChanges`; broadcast, no
-//!     Supabase).
+//!     (`embeddingChanges` subscription, in-process broadcast).
+//!   * `dag` — DAG structure events (`dagChanges`, in-process broadcast).
 //!
-//! Supabase-dependent subscriptions (`CreateMolecule`, `WalletStatus`,
-//! `ActiveWallet`) are out of scope here — they require Supabase
-//! Realtime infra.
+//! These are the validator's only subscriptions. (Molecule/wallet change
+//! feeds previously planned over Supabase Realtime were removed in the
+//! 2026-05-29 Supabase scrub; if reintroduced, build them over Postgres
+//! LISTEN/NOTIFY and they'll surface here the same way.)
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
