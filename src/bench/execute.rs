@@ -45,6 +45,10 @@ pub(crate) struct ExecResult {
     pub reason: Option<String>,
     pub latency_ms: u64,
     pub dag_index: usize,
+    /// Bundle-bound JWT returned by a U-isotope auth molecule (F-G2). The caller
+    /// stores it per identity and attaches it as `X-Auth-Token` on that
+    /// identity's subsequent non-U molecules (required under HIGH-1).
+    pub token: Option<String>,
 }
 
 struct Stats {
@@ -143,16 +147,23 @@ async fn inject_molecule(
     mol_json: serde_json::Value,
     mol_type: String,
     phase: i32,
+    token: Option<&str>,
 ) -> ExecResult {
     let gql_url = format!("{endpoint}/graphql");
 
     let query = serde_json::json!({
-        "query": "mutation ProposeMolecule($molecule: MoleculeInput!) { ProposeMolecule(molecule: $molecule) { status molecularHash reason payload } }",
+        "query": "mutation ProposeMolecule($molecule: MoleculeInput!) { ProposeMolecule(molecule: $molecule) { status molecularHash reason token payload } }",
         "variables": { "molecule": mol_json }
     });
 
     let start = Instant::now();
-    let resp = client.post(&gql_url).json(&query).send().await;
+    // Attach the identity's bundle-bound JWT (if captured from its U-auth
+    // molecule) — non-U molecules require it under HIGH-1 (F-G2).
+    let mut req = client.post(&gql_url).json(&query);
+    if let Some(t) = token {
+        req = req.header("X-Auth-Token", t);
+    }
+    let resp = req.send().await;
     let latency_ms = start.elapsed().as_millis() as u64;
 
     match resp {
@@ -174,6 +185,10 @@ async fn inject_molecule(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                 });
+            let token = body
+                .pointer("/data/ProposeMolecule/token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             ExecResult {
                 mol_type,
@@ -184,6 +199,7 @@ async fn inject_molecule(
                 reason,
                 latency_ms,
                 dag_index: 0,
+                token,
             }
         }
         Err(e) => ExecResult {
@@ -204,6 +220,7 @@ async fn inject_molecule(
             },
             latency_ms,
             dag_index: 0,
+            token: None,
         },
     }
 }
@@ -296,6 +313,10 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
     let mut rejected_details: Vec<(String, String, String)> = Vec::new();
     let mut error_details: Vec<(String, String, String, String, u16)> = Vec::new();
     let mut dag_accepted: usize = 0;
+    // F-G2: per-identity bundle-bound JWT (captured from each identity's Phase-0
+    // U-auth molecule). Phase 1 + Phase 2 attach it as X-Auth-Token so non-U
+    // molecules pass the HIGH-1 auth gate instead of 401-ing.
+    let mut identity_tokens: HashMap<i64, String> = HashMap::new();
 
     // Phase 0 + Phase 1: sequential injection
     for phase in 0..=1 {
@@ -328,7 +349,7 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
         pb.set_message(format!("Phase {phase} ({phase_name})"));
         let phase_start = Instant::now();
 
-        for (idx, (_id, _identity_idx, mol_type, mol_hash, payload_json)) in
+        for (idx, (_id, identity_idx, mol_type, mol_hash, payload_json)) in
             rows.iter().enumerate()
         {
             let mut mol_json: serde_json::Value =
@@ -336,13 +357,22 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
             mol_json["cellSlug"] = serde_json::json!(cell_slug);
 
             let ep = select_endpoint(&endpoints, &args.strategy, idx);
+            let token = identity_tokens.get(identity_idx).map(|s| s.as_str());
             let mut result =
-                inject_molecule(&client, ep, mol_json, mol_type.clone(), phase).await;
+                inject_molecule(&client, ep, mol_json, mol_type.clone(), phase, token).await;
 
             if result.validator_status == "accepted" {
                 dag_accepted += 1;
             }
             result.dag_index = dag_accepted;
+
+            // F-G2: capture the U-auth molecule's JWT for this identity so the
+            // setup/test phases authenticate as the same bundle.
+            if result.validator_status == "accepted" {
+                if let Some(t) = result.token.clone() {
+                    identity_tokens.insert(*identity_idx, t);
+                }
+            }
 
             if result.validator_status == "rejected" {
                 rejected_details.push((
@@ -429,7 +459,7 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
         for chunk in phase2_rows.chunks(effective_concurrency) {
             let mut futures = Vec::new();
 
-            for (idx, (_id, _identity_idx, mol_type, mol_hash, payload_json)) in
+            for (idx, (_id, identity_idx, mol_type, mol_hash, payload_json)) in
                 chunk.iter().enumerate()
             {
                 let mut mol_json: serde_json::Value =
@@ -445,9 +475,13 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
                 let client = client.clone();
                 let mol_type = mol_type.clone();
                 let mol_hash = mol_hash.clone();
+                // F-G2: clone this identity's JWT before the async move (all
+                // tokens were captured during the sequential Phase 0).
+                let token = identity_tokens.get(identity_idx).cloned();
 
                 futures.push(async move {
-                    let result = inject_molecule(&client, &ep, mol_json, mol_type, 2).await;
+                    let result =
+                        inject_molecule(&client, &ep, mol_json, mol_type, 2, token.as_deref()).await;
                     (result, mol_hash)
                 });
             }
