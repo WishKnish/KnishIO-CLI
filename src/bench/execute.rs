@@ -2,9 +2,10 @@
 //! into validator endpoint(s) via GraphQL, measuring latency and throughput.
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::plot;
@@ -447,7 +448,7 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
 
     if effective_concurrency < args.concurrency {
         eprintln!(
-            " Note: concurrency capped to {} (= identity count) to preserve ContinuID chain ordering",
+            " Note: concurrency capped to {} (= identity count); each identity's chain runs in order on its own task",
             effective_concurrency
         );
     }
@@ -456,77 +457,108 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
         pb.set_message("Phase 2 (Test)");
         let phase2_start = Instant::now();
 
-        for chunk in phase2_rows.chunks(effective_concurrency) {
-            let mut futures = Vec::new();
+        // F-G5: submit each identity's chain IN ORDER (ContinuID position K+1
+        // depends on K committing), running up to `effective_concurrency`
+        // identities in parallel. The previous fixed-size chunking over a
+        // (chain_order, identity_idx)-sorted list could split one identity's
+        // chain across concurrent batches when identities had uneven Phase-2
+        // counts → out-of-order submission → "signing position not found".
+        struct Phase2Submit {
+            mol_json: serde_json::Value,
+            mol_type: String,
+            mol_hash: String,
+            endpoint: String,
+            token: Option<String>,
+        }
 
-            for (idx, (_id, identity_idx, mol_type, mol_hash, payload_json)) in
-                chunk.iter().enumerate()
-            {
-                let mut mol_json: serde_json::Value =
-                    serde_json::from_str(payload_json).context("Failed to parse payload JSON")?;
-                mol_json["cellSlug"] = serde_json::json!(cell_slug);
-
-                let ep = select_endpoint(
-                    &endpoints,
-                    &args.strategy,
-                    all_results.len() + idx,
-                )
-                .to_string();
-                let client = client.clone();
-                let mol_type = mol_type.clone();
-                let mol_hash = mol_hash.clone();
-                // F-G2: clone this identity's JWT before the async move (all
-                // tokens were captured during the sequential Phase 0).
-                let token = identity_tokens.get(identity_idx).cloned();
-
-                futures.push(async move {
-                    let result =
-                        inject_molecule(&client, &ep, mol_json, mol_type, 2, token.as_deref()).await;
-                    (result, mol_hash)
+        // Group by identity (BTreeMap → deterministic order); the query's
+        // `ORDER BY chain_order ASC` is preserved within each group's push order.
+        let mut by_identity: BTreeMap<i64, Vec<Phase2Submit>> = BTreeMap::new();
+        for (gi, (_id, identity_idx, mol_type, mol_hash, payload_json)) in
+            phase2_rows.iter().enumerate()
+        {
+            let mut mol_json: serde_json::Value =
+                serde_json::from_str(payload_json).context("Failed to parse payload JSON")?;
+            mol_json["cellSlug"] = serde_json::json!(cell_slug);
+            let endpoint = select_endpoint(&endpoints, &args.strategy, gi).to_string();
+            // F-G2: this identity's bundle-bound JWT (captured in sequential Phase 0).
+            let token = identity_tokens.get(identity_idx).cloned();
+            by_identity
+                .entry(*identity_idx)
+                .or_default()
+                .push(Phase2Submit {
+                    mol_json,
+                    mol_type: mol_type.clone(),
+                    mol_hash: mol_hash.clone(),
+                    endpoint,
+                    token,
                 });
+        }
+
+        // One task per identity: submit its chain sequentially. buffer_unordered
+        // bounds how many identity-chains run concurrently.
+        let nested: Vec<Vec<(ExecResult, String)>> =
+            futures_util::stream::iter(by_identity.into_values())
+                .map(|specs| {
+                    let client = client.clone();
+                    async move {
+                        let mut out = Vec::with_capacity(specs.len());
+                        for spec in specs {
+                            let result = inject_molecule(
+                                &client,
+                                &spec.endpoint,
+                                spec.mol_json,
+                                spec.mol_type,
+                                2,
+                                spec.token.as_deref(),
+                            )
+                            .await;
+                            out.push((result, spec.mol_hash));
+                        }
+                        out
+                    }
+                })
+                .buffer_unordered(effective_concurrency.max(1))
+                .collect()
+                .await;
+
+        for (mut result, mol_hash) in nested.into_iter().flatten() {
+            if result.validator_status == "accepted" {
+                dag_accepted += 1;
+            }
+            result.dag_index = dag_accepted;
+
+            if result.validator_status == "rejected" {
+                rejected_details.push((
+                    mol_hash,
+                    result.mol_type.clone(),
+                    result.reason.clone().unwrap_or_default(),
+                ));
+            } else if result.validator_status != "accepted" {
+                error_details.push((
+                    mol_hash,
+                    result.mol_type.clone(),
+                    result.reason.clone().unwrap_or_default(),
+                    result.endpoint.clone(),
+                    result.http_status,
+                ));
             }
 
-            let results: Vec<(ExecResult, String)> =
-                futures_util::future::join_all(futures).await;
+            phase_stats
+                .entry(2)
+                .or_insert_with(Stats::new)
+                .record(&result);
+            type_stats
+                .entry(result.mol_type.clone())
+                .or_insert_with(Stats::new)
+                .record(&result);
+            endpoint_stats
+                .entry(result.endpoint.clone())
+                .or_insert_with(Stats::new)
+                .record(&result);
 
-            for (mut result, mol_hash) in results {
-                if result.validator_status == "accepted" {
-                    dag_accepted += 1;
-                }
-                result.dag_index = dag_accepted;
-
-                if result.validator_status == "rejected" {
-                    rejected_details.push((
-                        mol_hash,
-                        result.mol_type.clone(),
-                        result.reason.clone().unwrap_or_default(),
-                    ));
-                } else if result.validator_status != "accepted" {
-                    error_details.push((
-                        mol_hash,
-                        result.mol_type.clone(),
-                        result.reason.clone().unwrap_or_default(),
-                        result.endpoint.clone(),
-                        result.http_status,
-                    ));
-                }
-
-                phase_stats
-                    .entry(2)
-                    .or_insert_with(Stats::new)
-                    .record(&result);
-                type_stats
-                    .entry(result.mol_type.clone())
-                    .or_insert_with(Stats::new)
-                    .record(&result);
-                endpoint_stats
-                    .entry(result.endpoint.clone())
-                    .or_insert_with(Stats::new)
-                    .record(&result);
-
-                all_results.push(result);
-                pb.inc(1);
-            }
+            all_results.push(result);
+            pb.inc(1);
         }
 
         let phase2_elapsed = phase2_start.elapsed().as_millis() as u64;
