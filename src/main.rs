@@ -200,7 +200,12 @@ enum Commands {
         accel: AccelFlag,
     },
 
-    /// Rebuild validator image from scratch and restart
+    /// Rebuild the validator image and restart.
+    ///
+    /// Uses Docker's layer cache + the Dockerfile's BuildKit cargo cache mounts,
+    /// so an unchanged-source rebuild takes ~1–2 min and a code change recompiles
+    /// only the affected crates. Pass `--no-cache` for a true from-scratch build
+    /// (also refreshes apt/base-image layers — use after upstream package updates).
     Rebuild {
         /// Hardware acceleration profile to target on restart.
         #[arg(long, value_enum, default_value_t = AccelFlag::Auto)]
@@ -210,6 +215,13 @@ enum Commands {
         /// as `start --gen-model`.
         #[arg(long)]
         gen_model: Option<String>,
+
+        /// Bust ALL build caches (layer + image) for a clean from-scratch build.
+        /// Slower (re-runs apt/rustfmt/compile); use to pick up upstream apt or
+        /// base-image updates. The BuildKit cargo cache mount still persists
+        /// (it survives --no-cache), so the compile stays incremental.
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Pull/build latest version, restart, and verify health
@@ -881,14 +893,14 @@ async fn main() -> Result<()> {
             let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             docker::destroy(&files, volumes).await?;
         }
-        Commands::Rebuild { accel, gen_model } => {
+        Commands::Rebuild { accel, gen_model, no_cache } => {
             let (_accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
             let resolved = gen_model.as_deref().map(docker::resolve_gen_model);
             let env: Vec<(&str, &str)> = match &resolved {
                 Some(m) => vec![("GENERATION_MODEL", m.as_str())],
                 None => vec![],
             };
-            docker::rebuild(&files, &env).await?;
+            docker::rebuild(&files, &env, no_cache).await?;
         }
         Commands::Update {
             build,

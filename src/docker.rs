@@ -87,6 +87,12 @@ async fn compose(files: &[PathBuf], args: &[&str], env: &[(&str, &str)]) -> Resu
 
     let mut cmd = Command::new("docker");
     cmd.arg("compose");
+    // Batch S: force BuildKit on so the validator Dockerfile's `# syntax`
+    // directive + `--mount=type=cache` cargo caches are honored (incremental
+    // in-container rebuilds). Compose v2 defaults to BuildKit, but setting these
+    // explicitly keeps it correct in CI/headless/older-engine environments too.
+    cmd.env("DOCKER_BUILDKIT", "1");
+    cmd.env("COMPOSE_DOCKER_CLI_BUILD", "1");
     for f in files {
         cmd.arg("-f").arg(f);
     }
@@ -171,9 +177,20 @@ pub async fn destroy(files: &[PathBuf], volumes: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn rebuild(files: &[PathBuf], env: &[(&str, &str)]) -> Result<()> {
-    output::info("Rebuilding KnishIO validator (no cache)...");
-    compose(files, &["build", "--no-cache"], env).await?;
+pub async fn rebuild(files: &[PathBuf], env: &[(&str, &str)], no_cache: bool) -> Result<()> {
+    // Default rebuild uses the layer cache + the Dockerfile's BuildKit cargo
+    // cache mounts → incremental (~1–2 min unchanged, a few min on a code
+    // change). `--no-cache` busts the layer cache for a clean from-scratch image
+    // (the cargo cache mount still persists — it survives --no-cache — so the
+    // compile stays incremental even then). Batch S.
+    let mut build_args = vec!["build"];
+    if no_cache {
+        build_args.push("--no-cache");
+        output::info("Rebuilding KnishIO validator (no cache — clean build)...");
+    } else {
+        output::info("Rebuilding KnishIO validator (incremental)...");
+    }
+    compose(files, &build_args, env).await?;
     output::info("Starting rebuilt stack...");
     if compose(files, &["up", "-d"], env).await? {
         output::success("Rebuilt and running");
