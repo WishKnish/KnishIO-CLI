@@ -410,7 +410,8 @@ pub async fn set_mode(config: &Config, slug: &str, mode: &str) -> Result<()> {
              jsonb_build_object( \
                  'mode', '{escaped_mode}'::text, \
                  'authorized_bundles', COALESCE(config->'access'->'authorized_bundles', '[]'::jsonb), \
-                 'admin_bundles', COALESCE(config->'access'->'admin_bundles', '[]'::jsonb) \
+                 'admin_bundles', COALESCE(config->'access'->'admin_bundles', '[]'::jsonb), \
+                 'allow_guest', COALESCE(config->'access'->'allow_guest', to_jsonb('{escaped_mode}' = 'open')) \
              ) \
          ) WHERE slug = '{escaped_slug}' RETURNING slug"
     );
@@ -437,6 +438,32 @@ pub async fn set_mode(config: &Config, slug: &str, mode: &str) -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
+
+/// Set the cell's guest-auth policy (SEC-010 / Batch AG): whether the cell permits
+/// GUEST (anonymous) auth-token issuance + guest reads. Decoupled from `mode` — a
+/// `permissioned` cell may still allow anonymous reads. Merges into the existing
+/// `access` object so mode/authorized_bundles/admin_bundles are preserved.
+pub async fn set_allow_guest(config: &Config, slug: &str, allow: bool) -> Result<()> {
+    validate_slug(slug)?;
+    let escaped_slug = slug.replace('\'', "''");
+    // `||` merges allow_guest into the existing access object (preserving its other
+    // keys) and creates it when absent — jsonb_set's create_missing only affects the
+    // final path key, not intermediate objects. RETURNING folds the existence check in.
+    let sql = format!(
+        "UPDATE cells SET config = jsonb_set( \
+             COALESCE(config, '{{}}'::jsonb), \
+             '{{access}}', \
+             COALESCE(config->'access', '{{}}'::jsonb) || jsonb_build_object('allow_guest', {allow}) \
+         ) WHERE slug = '{escaped_slug}' RETURNING slug"
+    );
+    let returned = psql(config, &sql).await?;
+    if returned.trim().is_empty() {
+        anyhow::bail!("Cell '{}' not found", slug);
+    }
+    emit_audit_event(config, "cell_set_allow_guest", slug, serde_json::json!({"allow_guest": allow})).await;
+    output::success(&format!("Cell '{}' → allow_guest={}", slug, allow));
     Ok(())
 }
 

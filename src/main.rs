@@ -521,6 +521,16 @@ enum CellCommands {
         mode: AccessMode,
     },
 
+    /// Allow or deny guest (anonymous) auth + reads for a cell (SEC-010)
+    SetAllowGuest {
+        /// Cell slug
+        slug: String,
+
+        /// Whether guests are allowed (true|false)
+        #[arg(action = clap::ArgAction::Set)]
+        allow: bool,
+    },
+
     /// Authorize a bundle for a permissioned cell
     Grant {
         /// Cell slug
@@ -973,6 +983,9 @@ async fn main() -> Result<()> {
             }
             CellCommands::SetMode { slug, mode } => {
                 cell::set_mode(&cfg, &slug, mode.as_str()).await?;
+            }
+            CellCommands::SetAllowGuest { slug, allow } => {
+                cell::set_allow_guest(&cfg, &slug, allow).await?;
             }
             CellCommands::Grant { slug, bundle, from_file } => {
                 match (bundle, from_file) {
