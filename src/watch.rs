@@ -149,6 +149,34 @@ subscription Watch($cellSlug: String) {
 }
 "#;
 
+// CreateMolecule (WP-016): per-bundle molecule-status feed — the full molecule
+// (status + atoms) as it is accepted. Field names are the camelCase wire form
+// from `src/graphql/types/{subscriptions,molecule}.rs`; `bundle` is required.
+const MOLECULES_QUERY: &str = r#"
+subscription Watch($bundle: String!) {
+  CreateMolecule(bundle: $bundle) {
+    molecularHash
+    status
+    cellSlug
+    bundleHash
+    counterparty
+    height
+    depth
+    createdAt
+    reason
+    atoms {
+      isotope
+      position
+      tokenSlug
+      value
+      index
+      metaType
+      metaId
+    }
+  }
+}
+"#;
+
 /// Public entry: `knishio watch embeddings`.
 pub async fn embeddings(
     cfg: &Config,
@@ -168,6 +196,14 @@ pub async fn dag(cfg: &Config, cell_slug: Option<String>) -> Result<()> {
         "cellSlug": cell_slug,
     });
     run_subscription(cfg, DAG_QUERY, variables, "dagChanges").await
+}
+
+/// Public entry: `knishio watch molecules --bundle <hash>`.
+pub async fn molecules(cfg: &Config, bundle: String) -> Result<()> {
+    let variables = json!({
+        "bundle": bundle,
+    });
+    run_subscription(cfg, MOLECULES_QUERY, variables, "CreateMolecule").await
 }
 
 // ── Subscription driver ─────────────────────────────────────────────

@@ -439,6 +439,14 @@ enum WatchSubject {
         #[arg(long)]
         cell: Option<String>,
     },
+
+    /// Stream per-bundle molecule-status events — full molecule (status +
+    /// atoms) as it is accepted (subscription `CreateMolecule`).
+    Molecules {
+        /// Bundle hash to follow (required by the CreateMolecule subscription).
+        #[arg(long)]
+        bundle: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1218,6 +1226,9 @@ async fn main() -> Result<()> {
             }
             WatchSubject::Dag { cell } => {
                 watch::dag(&cfg, cell).await?;
+            }
+            WatchSubject::Molecules { bundle } => {
+                watch::molecules(&cfg, bundle).await?;
             }
         },
         Commands::Package { target, clean } => {
