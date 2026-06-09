@@ -548,6 +548,28 @@ knishio cell show <SLUG>
 
 Output includes the access mode, the contents of `authorized_bundles` and `admin_bundles`, and the cell's lifecycle counters. Use this after `set-mode` / `grant` / `add-admin` to confirm the change landed.
 
+### cell usage
+
+Per-cell activity counters — rolling 24h query/mutation counts plus token/rule/meta totals. Omit the slug to list every cell, ordered by recent activity (busiest first).
+
+```bash
+# All cells, busiest first
+knishio cell usage
+
+# A single cell
+knishio cell usage <SLUG>
+```
+
+```
+Cell usage
+SLUG                      QUERIES/24h    MUTNS/24h   TOKENS    RULES    METAS
+----------------------------------------------------------------------------
+public                              0            0        6        0       10
+TOVA                                0            0        0        0        2
+```
+
+Reads the `cells` resource counters directly via `psql` (`query_count_24h` / `mutation_count_24h` / `token_count` / `rule_count` / `meta_count`), so it needs DB access — the same connection the other `cell` / `backup` / `psql` subcommands use — not the HTTP API.
+
 ### cell set-mode
 
 Switch an existing cell's ABAC access mode. Initializes empty `authorized_bundles` / `admin_bundles` lists if they don't already exist.
@@ -1093,6 +1115,23 @@ knishio watch dag
 
 Uses the modern `graphql-transport-ws` subprotocol over WSS. Self-signed certificates are accepted when `insecure_tls = true` is set in config.
 
+### watch molecules
+
+Live-stream per-bundle molecule-status events (subscription `CreateMolecule`) — the full molecule (status + atoms) as it is accepted for a bundle.
+
+```bash
+knishio watch molecules --bundle <HEX>
+# ℹ Subscribed to CreateMolecule; streaming events (Ctrl-C to stop)…
+# {"molecularHash":"…","status":"accepted","bundleHash":"…","cellSlug":"TESTCELL","height":42,"reason":null,"atoms":[{"isotope":"M","position":"…","tokenSlug":"…"}, …]}
+# …
+```
+
+| Flag | Description |
+|------|-------------|
+| `--bundle <hex>` | **Required** — the bundle hash to follow (`CreateMolecule` is a per-bundle subscription) |
+
+Same `graphql-transport-ws` / WSS transport as `watch dag` and `watch embeddings`.
+
 ## Subsystem Status
 
 Diagnostic surfaces that report the live state of the validator's optional background subsystems. All read-only; safe to call from any operator workflow. The corresponding HTTP endpoints (`/p2p/status`, `/osmosis/status`, `/ai/status`) skip rate-limiting + auth, matching the existing `/readyz` posture — firewall the validator's port externally if you don't want these surfaces exposed beyond the operator network.
@@ -1195,6 +1234,72 @@ Lifetime Totals
 When `OSMOSIS_DRY_RUN=true`, the "Last Cycle / Accepted pruned" line is annotated `(dry-run — not actually deleted)` and a warn footer points at the env var to flip live. Dry-run is the recommended posture for first deploys; observe the counts for a few cycles, then flip live.
 
 Hits `GET /osmosis/status`. Same rate-limit / auth posture as `/p2p/status`.
+
+## Validator Configuration & Schema
+
+Read-only introspection of the validator's *running* configuration and GraphQL schema. The config commands hit `GET /config` — a redacted snapshot the validator builds by re-reading its own environment, so it reflects the loaded defaults rather than whatever a local `.env` / `knishio.toml` happens to say. **Secrets are omitted server-side** (no `JWT_SECRET`, no `DATABASE_URL` / password). Same rate-limit / auth posture as the other status endpoints.
+
+### config show
+
+Print the full redacted runtime config — the `server`, `database`, `auth`, `tls`, `rate_limit`, `reconciliation`, `observability`, and `features` sections.
+
+```bash
+knishio config show
+```
+
+```
+Validator runtime config
+  server
+    host                         127.0.0.1
+    port                         8080
+    …
+  observability
+    log_slow_queries_ms          50
+    prometheus_enabled           true
+    …
+```
+
+Hits `GET /config`.
+
+### rate-limit status
+
+Show just the active rate-limit configuration (the `rate_limit` section of `GET /config`): `enabled`, the general + auth per-window limits, the burst allowance, and the window length.
+
+```bash
+knishio rate-limit status
+```
+
+### reconciliation status
+
+Show the bond-reconciliation worker's configuration (`enabled` / interval / batch size / pending TTL) **plus live activity counters** scraped from `/metrics`: `bonds_reconciled_total`, `bonds_reconcile_failed_total`, `pending_swept_total`.
+
+```bash
+knishio reconciliation status
+```
+
+Hits `GET /config` for the config section and `GET /metrics` for the counters.
+
+### schema export
+
+Export the validator's GraphQL schema. SDL is the canonical form (`GET /schema`); `--format json` runs the standard introspection query against `/graphql`.
+
+```bash
+# Canonical SDL to stdout
+knishio schema export
+
+# SDL to a file
+knishio schema export -o schema.graphql
+
+# JSON introspection (for client codegen tooling)
+knishio schema export --format json -o schema.json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--format <sdl\|json>` | Output format. `sdl` (default) reads the canonical `GET /schema`; `json` POSTs introspection to `/graphql` |
+| `-o, --output <file>` | Write to a file instead of stdout |
+
+> The validator caps GraphQL query complexity as a DoS guard, and the full introspection query can exceed it. If `--format json` is rejected (`Query is too complex.`), the command fails with a pointer to use the default `--format sdl` — the canonical schema source.
 
 ## Packaging
 

@@ -210,6 +210,51 @@ pub async fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// `knishio cell usage [<slug>]` — per-cell resource counters (query/mutation
+/// volume over 24h + token/rule/meta totals; GAP-06-004 counters on the `cells`
+/// table). No quota *limits* exist in the schema — these are usage counters.
+pub async fn usage(config: &Config, slug: Option<String>) -> Result<()> {
+    let cols = "slug, query_count_24h, mutation_count_24h, token_count, rule_count, meta_count";
+    let sql = match &slug {
+        Some(s) => {
+            validate_slug(s)?;
+            format!(
+                "SELECT {cols} FROM cells WHERE slug = '{}'",
+                s.replace('\'', "''")
+            )
+        }
+        None => format!(
+            "SELECT {cols} FROM cells ORDER BY (query_count_24h + mutation_count_24h) DESC"
+        ),
+    };
+    let result = psql(config, &sql).await?;
+    if result.is_empty() {
+        output::info(if slug.is_some() {
+            "Cell not found"
+        } else {
+            "No cells found"
+        });
+        return Ok(());
+    }
+
+    output::header("Cell usage");
+    println!(
+        "{:<24} {:>12} {:>12} {:>8} {:>8} {:>8}",
+        "SLUG", "QUERIES/24h", "MUTNS/24h", "TOKENS", "RULES", "METAS"
+    );
+    println!("{}", "-".repeat(76));
+    for line in result.lines() {
+        let p: Vec<&str> = line.split('|').collect();
+        if p.len() >= 6 {
+            println!(
+                "{:<24} {:>12} {:>12} {:>8} {:>8} {:>8}",
+                p[0], p[1], p[2], p[3], p[4], p[5]
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Purge all data associated with a benchmark cell, then hard-delete it.
 /// SAFETY: Only cells with the BENCH_CLI_ prefix can be purged.
 /// Atoms, bonds, and cascades auto-cascade from molecule deletion.

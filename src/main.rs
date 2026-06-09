@@ -84,7 +84,9 @@ mod output;
 mod p2p;
 mod package;
 mod paths;
+mod schema;
 mod update;
+mod vconfig;
 mod watch;
 
 use anyhow::Result;
@@ -337,6 +339,30 @@ enum Commands {
         command: OsmosisCommands,
     },
 
+    /// Validator runtime config (redacted snapshot via GET /config)
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+
+    /// Rate-limit configuration (via GET /config)
+    RateLimit {
+        #[command(subcommand)]
+        command: RateLimitCommands,
+    },
+
+    /// Reconciliation worker config + activity (GET /config + /metrics)
+    Reconciliation {
+        #[command(subcommand)]
+        command: ReconciliationCommands,
+    },
+
+    /// GraphQL schema export (SDL via GET /schema, or JSON introspection)
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommands,
+    },
+
     /// Health check. Defaults to the liveness probe (GET /healthz);
     /// `--full` hits the richer /health endpoint with DB latency + cache
     /// stats + validator version.
@@ -517,6 +543,13 @@ enum CellCommands {
     Show {
         /// Cell slug
         slug: String,
+    },
+
+    /// Show per-cell resource usage counters (queries/mutations over 24h +
+    /// token/rule/meta totals). Omit the slug to list all cells.
+    Usage {
+        /// Cell slug (optional — all cells when omitted)
+        slug: Option<String>,
     },
 
     /// Set the cell's ABAC access mode (initializes empty bundle lists if absent)
@@ -817,6 +850,37 @@ enum OsmosisCommands {
 }
 
 #[derive(Subcommand)]
+enum ConfigCommands {
+    /// Show the validator's redacted runtime config (all sections).
+    Show,
+}
+
+#[derive(Subcommand)]
+enum RateLimitCommands {
+    /// Show the active rate-limit configuration.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum ReconciliationCommands {
+    /// Show reconciliation worker config + live activity counters.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum SchemaCommands {
+    /// Export the GraphQL schema (SDL by default; `--format json` for introspection).
+    Export {
+        /// Output format: `sdl` (default) or `json`.
+        #[arg(long, default_value = "sdl")]
+        format: String,
+        /// Write to a file instead of stdout.
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AuditCommands {
     /// List recent audit events (newest first). Filters compose; all
     /// optional. Without filters, prints the most recent N events
@@ -988,6 +1052,9 @@ async fn main() -> Result<()> {
             }
             CellCommands::Show { slug } => {
                 cell::show(&cfg, &slug).await?;
+            }
+            CellCommands::Usage { slug } => {
+                cell::usage(&cfg, slug).await?;
             }
             CellCommands::SetMode { slug, mode } => {
                 cell::set_mode(&cfg, &slug, mode.as_str()).await?;
@@ -1166,6 +1233,20 @@ async fn main() -> Result<()> {
         // ── Osmosis pruning observability ───────────────────
         Commands::Osmosis { command } => match command {
             OsmosisCommands::Status => osmosis::status(&cfg).await?,
+        },
+        Commands::Config { command } => match command {
+            ConfigCommands::Show => vconfig::show(&cfg).await?,
+        },
+        Commands::RateLimit { command } => match command {
+            RateLimitCommands::Status => vconfig::rate_limit_status(&cfg).await?,
+        },
+        Commands::Reconciliation { command } => match command {
+            ReconciliationCommands::Status => vconfig::reconciliation_status(&cfg).await?,
+        },
+        Commands::Schema { command } => match command {
+            SchemaCommands::Export { format, output } => {
+                schema::export(&cfg, &format, output).await?
+            }
         },
 
         // ── Audit log queries ───────────────────────────────
