@@ -140,6 +140,17 @@ fn advance_chain(mol: &Molecule) -> Result<String> {
         .context("Remainder wallet has no position")
 }
 
+/// Generate a fresh random OTS position (64-char hex). KnishIO positions are
+/// random (not sequential), so a throwaway wallet yields a unique position; the
+/// signer re-derives the key from `secret + position + token` when signing.
+/// Used to thread the value-transfer ContinuID/token chain (see `make_value_transfer`).
+fn fresh_position(secret: &str) -> Result<String> {
+    Wallet::create(Some(secret), None, "USER", None, None)
+        .context("Failed to derive fresh position wallet")?
+        .position
+        .context("Derived wallet has no position")
+}
+
 /// Serialize a molecule to JSON string for storage.
 fn mol_to_payload(mol: &Molecule) -> Result<(String, String)> {
     let mol_hash = mol
@@ -248,27 +259,44 @@ fn make_meta(
     Ok(mol)
 }
 
-/// Create a token-create molecule (C + manual I).
-/// Returns (molecule, token_wallet_position).
+/// Create a token-create molecule (C + I) that mints the initial supply to a
+/// token wallet AT `mint_position` and advances the bundle's ContinuID pointer to
+/// that same `mint_position`.
+///
+/// This alignment is what makes a subsequent value transfer valid: per patent
+/// ¶0074 Rule 3 the validator requires `atoms[0].position == current ContinuID
+/// pointer`, and a value transfer signs `atoms[0]` from the funded token wallet.
+/// By minting the supply to `mint_position` AND forcing the ContinuID I-atom
+/// (USER remainder) to `mint_position`, the first transfer signs from
+/// `mint_position` (where the balance lives) and matches the pointer. The C-atom
+/// itself signs from `source_position` (the pre-create ContinuID pointer).
 fn make_token_create(
     secret: &str,
     bundle: &str,
-    position: &str,
+    source_position: &str,
+    mint_position: &str,
     token_slug: &str,
     amount: f64,
-) -> Result<(Molecule, String)> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None)
+) -> Result<Molecule> {
+    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(source_position), None)
         .context("Failed to create token-create wallet")?;
 
-    let recipient_wallet = Wallet::create(Some(secret), None, token_slug, None, None)
-        .context("Failed to create token recipient wallet")?;
-    let token_wallet_position = recipient_wallet.position.clone().unwrap_or_default();
+    // Mint the initial supply to the token wallet at `mint_position`.
+    let recipient_wallet =
+        Wallet::create(Some(secret), None, token_slug, Some(mint_position), None)
+            .context("Failed to create token recipient wallet")?;
+
+    // Force the ContinuID I-atom (USER remainder) to `mint_position` too, so the
+    // post-create ContinuID pointer == the funded token wallet position.
+    // `add_continuid_atom` keeps a remainder that is already a USER wallet.
+    let continuid_remainder = Wallet::create(Some(secret), None, "USER", Some(mint_position), None)
+        .context("Failed to create token-create ContinuID remainder wallet")?;
 
     let mut mol = Molecule::with_params(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
-        None,
+        Some(continuid_remainder),
         Some(FIXTURE_CELL_SLUG.to_string()),
         None,
     );
@@ -291,7 +319,7 @@ fn make_token_create(
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign token-create molecule")?;
 
-    Ok((mol, token_wallet_position))
+    Ok(mol)
 }
 
 /// Create a token-request molecule (T + manual I).
@@ -338,37 +366,50 @@ fn make_token_request(
     Ok(mol)
 }
 
-/// Create a value-transfer molecule (V+V+V + manual I).
+/// Create a value-transfer molecule (V+V+V + I) that is ContinuID-chain-correct
+/// and chainable.
+///
+/// `position` is BOTH the OTS signing position (atoms[0], the source V-atom) and
+/// the funded token wallet position; it must equal the bundle's current ContinuID
+/// pointer (patent ¶0074 Rule 3). `next_position` receives the **token remainder**
+/// V-atom AND the **ContinuID I-atom** (USER) — placing both at the same position
+/// so the next transfer signs from `next_position` (where the remainder balance now
+/// lives) and again matches the advanced ContinuID pointer. This is the key to
+/// chaining: the token-balance chain and the ContinuID chain stay unified.
 fn make_value_transfer(
     secret: &str,
     bundle: &str,
-    token_position: &str,
-    continuid_position: &str,
+    position: &str,
+    next_position: &str,
     recipient_bundle: &str,
     token_slug: &str,
     amount: f64,
     source_balance: f64,
     transfer_idx: usize,
 ) -> Result<Molecule> {
-    let mut source_wallet =
-        Wallet::create(Some(secret), None, token_slug, Some(token_position), None)
-            .context("Failed to create value-transfer source wallet")?;
+    let mut source_wallet = Wallet::create(Some(secret), None, token_slug, Some(position), None)
+        .context("Failed to create value-transfer source wallet")?;
     source_wallet.balance = source_balance.to_string();
 
-    let recipient_wallet =
-        Wallet::create(Some(recipient_bundle), None, token_slug, None, None)
-            .context("Failed to create value-transfer recipient wallet")?;
+    let recipient_wallet = Wallet::create(Some(recipient_bundle), None, token_slug, None, None)
+        .context("Failed to create value-transfer recipient wallet")?;
+
+    // Token remainder lands at `next_position` (same token). `init_value` reads
+    // `self.remainder_wallet` for the remainder V-atom, so set it up front.
+    let token_remainder = Wallet::create(Some(secret), None, token_slug, Some(next_position), None)
+        .context("Failed to create value-transfer token-remainder wallet")?;
 
     let mut mol = Molecule::with_params(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
-        None,
+        Some(token_remainder),
         Some(FIXTURE_CELL_SLUG.to_string()),
         None,
     );
 
-    mol.continuid_position = Some(continuid_position.to_string());
+    // I-atom previousPosition = the position being consumed (current ContinuID).
+    mol.continuid_position = Some(position.to_string());
 
     mol.init_value(&recipient_wallet, amount)
         .with_context(|| {
@@ -376,6 +417,16 @@ fn make_value_transfer(
                 "Failed to init value transfer #{transfer_idx} (amount={amount}, balance={source_balance})"
             )
         })?;
+
+    // Re-point the remainder wallet to a USER wallet at `next_position` so the
+    // ContinuID I-atom (which `add_continuid_atom` keeps when it is already USER)
+    // advances the pointer to `next_position` — the SAME position the token
+    // remainder just landed at. This keeps the next transfer's atoms[0].position
+    // (== `next_position`) equal to both the ContinuID pointer and the balance.
+    mol.remainder_wallet = Some(
+        Wallet::create(Some(secret), None, "USER", Some(next_position), None)
+            .context("Failed to create value-transfer ContinuID remainder wallet")?,
+    );
 
     mol.add_continuid_atom()
         .context("Failed to add ContinuID atom to value-transfer")?;
@@ -471,7 +522,14 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
     // Calculate expected molecule counts
     let auth_count = args.identities;
     let setup_count = if type_set.needs_token_setup {
-        args.identities * 2
+        // token-create for every identity; token-request only on the burn-only
+        // path. Value transfers skip the request (the C-isotope already funds the
+        // creator and the request would advance ContinuID off the funded wallet).
+        if type_set.has_value_transfer {
+            args.identities
+        } else {
+            args.identities * 2
+        }
     } else {
         0
     };
@@ -503,7 +561,9 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
     if setup_count > 0 {
         println!(" Phase 1 (setup):     {setup_count}");
         println!("   token-create:      {}", args.identities);
-        println!("   token-request:     {}", args.identities);
+        if !type_set.has_value_transfer {
+            println!("   token-request:     {}", args.identities);
+        }
     }
     println!(" Phase 2 (test):      {test_count}");
     if type_set.has_meta {
@@ -639,15 +699,22 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
 
         // ── Phase 1: Token setup (if needed) ──
         let mut token_balance = args.token_amount;
-        let mut token_pos = String::new();
 
         if type_set.needs_token_setup {
-            // token-create
+            // token-create: mint the supply to `mint_position` AND advance the
+            // ContinuID pointer to `mint_position`, so a value transfer can sign
+            // atoms[0] from the funded token wallet and satisfy ¶0074 Rule 3.
             let phase_start = Instant::now();
-            let (tc_mol, tc_wallet_pos) =
-                make_token_create(&secret, bundle, &next_pos, &token_slug, args.token_amount)?;
-            token_pos = tc_wallet_pos;
-            next_pos = advance_chain(&tc_mol)?;
+            let mint_position = fresh_position(&secret)?;
+            let tc_mol = make_token_create(
+                &secret,
+                bundle,
+                &next_pos,
+                &mint_position,
+                &token_slug,
+                args.token_amount,
+            )?;
+            next_pos = mint_position; // ContinuID pointer now == the funded token wallet
             let (hash, payload) = mol_to_payload(&tc_mol)?;
             insert_mol(
                 &conn,
@@ -673,41 +740,46 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             e.0 += 1;
             e.1 += tc_elapsed;
 
-            // token-request
-            let phase_start = Instant::now();
-            let tr_mol = make_token_request(
-                &secret,
-                bundle,
-                &next_pos,
-                &token_slug,
-                args.token_amount,
-                k,
-            )?;
-            next_pos = advance_chain(&tr_mol)?;
-            let (hash, payload) = mol_to_payload(&tr_mol)?;
-            insert_mol(
-                &conn,
-                k,
-                1,
-                chain_order,
-                global_order,
-                "token-request",
-                &hash,
-                &payload,
-            )?;
-            chain_order += 1;
-            global_order += 1;
-            pb.inc(1);
+            // token-request: legacy distribution step retained ONLY for burn-only
+            // runs. For value transfers it is unnecessary (the C-isotope already
+            // credited the creator's balance, c_isotope.rs) and would advance
+            // ContinuID off the funded wallet, breaking the unified value chain.
+            if !type_set.has_value_transfer {
+                let phase_start = Instant::now();
+                let tr_mol = make_token_request(
+                    &secret,
+                    bundle,
+                    &next_pos,
+                    &token_slug,
+                    args.token_amount,
+                    k,
+                )?;
+                next_pos = advance_chain(&tr_mol)?;
+                let (hash, payload) = mol_to_payload(&tr_mol)?;
+                insert_mol(
+                    &conn,
+                    k,
+                    1,
+                    chain_order,
+                    global_order,
+                    "token-request",
+                    &hash,
+                    &payload,
+                )?;
+                chain_order += 1;
+                global_order += 1;
+                pb.inc(1);
 
-            let tr_elapsed = phase_start.elapsed().as_secs_f64();
-            let e = phase_timings.entry("setup").or_insert((0, 0.0));
-            e.0 += 1;
-            e.1 += tr_elapsed;
-            let e = type_timings
-                .entry("token-request".to_string())
-                .or_insert((0, 0.0));
-            e.0 += 1;
-            e.1 += tr_elapsed;
+                let tr_elapsed = phase_start.elapsed().as_secs_f64();
+                let e = phase_timings.entry("setup").or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 += tr_elapsed;
+                let e = type_timings
+                    .entry("token-request".to_string())
+                    .or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 += tr_elapsed;
+            }
         }
 
         // ── Phase 2: Test molecules ──
@@ -767,21 +839,23 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                 let recipient_bundle = &bundles[recipient_idx];
 
                 let start = Instant::now();
+                // Unified value chain: sign from `next_pos` (== current ContinuID
+                // pointer == funded token wallet), and route BOTH the token remainder
+                // and the ContinuID I-atom to a fresh `next` position so the next
+                // transfer signs from where the remainder balance now lives.
+                let next = fresh_position(&secret)?;
                 let mol = make_value_transfer(
                     &secret,
                     bundle,
-                    &token_pos,
                     &next_pos,
+                    &next,
                     recipient_bundle,
                     &token_slug,
                     amount_per_transfer,
                     token_balance,
                     vt_idx,
                 )?;
-                next_pos = advance_chain(&mol)?;
-                if let Some(v_remainder) = mol.atoms.get(2) {
-                    token_pos = v_remainder.position.clone();
-                }
+                next_pos = next;
                 token_balance -= amount_per_transfer;
                 let (hash, payload) = mol_to_payload(&mol)?;
                 insert_mol(
