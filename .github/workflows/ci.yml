@@ -1,0 +1,49 @@
+# knishio-cli CI — clippy + test gate + dependency-advisory audit.
+# House Rust style (mirrors the SDK repos): pinned action refs,
+# dtolnay/rust-toolchain@stable, exit-code gates, no floating tags.
+# Cargo.lock is gitignored, so cargo audit runs against fresh resolution
+# (what consumers get) — must stay free of RUSTSEC vulnerabilities
+# (notably libcrux-ml-kem >= 0.0.9 via knishio-client 0.9.2).
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    name: clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Lint gate: clippy warn-level (matches the crate's #![warn(clippy::all)]);
+      # NOT -D warnings.
+      - name: cargo clippy
+        run: cargo clippy --all-targets
+
+      - name: cargo test
+        run: cargo test
+
+  audit:
+    name: cargo audit (dependency advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cargo.lock is gitignored → resolve fresh (what consumers build), then
+      # audit that graph against the RUSTSEC advisory database.
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
