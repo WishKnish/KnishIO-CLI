@@ -2,12 +2,11 @@
 //!
 //! Replaces the former subprocess delegation to the standalone `knishio-bench`
 //! binary. All molecule generation, HTTP injection, report generation, and
-//! latency plotting are now performed in-process.
+//! latency reporting (CSV + JSON) are now performed in-process.
 
 pub mod execute;
 pub mod generate;
 pub(crate) mod molecules;
-pub mod plot;
 
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,7 +80,6 @@ pub async fn execute(
         concurrency: args.concurrency,
         cell_slug: Some(slug.clone()),
         csv: args.csv,
-        plot: args.plot,
         insecure_tls: args.insecure_tls,
     };
 
@@ -128,7 +126,6 @@ pub async fn run(
         concurrency: exec_args.concurrency,
         cell_slug: exec_args.cell_slug,
         csv: exec_args.csv,
-        plot: exec_args.plot,
         insecure_tls: exec_args.insecure_tls,
     };
     execute(exec, config, cell_admin, keep).await?;

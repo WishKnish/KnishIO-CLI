@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.1
+
+Patch release: honest bench banners, portable Linux installs, and a real
+libcrux vulnerability fix (via the SDK).
+
+- **CLI-3 fix — honest `bench` target banners.** `bench` printed the HTTP-URL
+  banner even for its `--host` psql/ssh cell-admin transport, so
+  `bench clean --host <remote>` showed a wrong `TARGET: https://localhost:8080`
+  while correctly operating on the remote. Each bench subcommand now prints its
+  own precise banner(s): run/execute show the HTTP submit target **and** the
+  cell-admin transport; clean shows the psql/ssh transport; generate is silent.
+- **Portable Linux installs / green CI — dropped the built-in bench PNG.** The
+  latency plot used `plotters`' `ttf` feature → `font-kit` → system
+  `fontconfig`, which broke `cargo clippy`/build in CI and **every
+  `cargo install knishio-cli` on a Linux box without libfontconfig**. `bench`
+  still writes the latency **CSV** + report **JSON** (plot them with the repo's
+  Python script); the `plotters` dependency and its font/image subtree are gone.
+- **Security — cleared 3 libcrux advisories at the source.** RUSTSEC-2026-0207,
+  -0208 (`libcrux-sha3`) and -0212 (`libcrux-secrets`) reached the CLI
+  transitively via `knishio-client`. Fixed in the SDK (bumped `libcrux-ml-kem`
+  0.0.9→0.0.10, pulling libcrux-sha3 0.0.10 + libcrux-secrets 0.0.6) and
+  consumed here by bumping **`knishio-client` 0.9.2 → 0.9.3** — a real fix, not
+  an audit-ignore. `cargo audit` is clean (0 vulnerabilities). ML-KEM byte-parity
+  with the other SDKs was validated across the bump.
+
 ## 0.2.0
 
 Deployment-orchestration release. Turns the CLI into the single tool for
