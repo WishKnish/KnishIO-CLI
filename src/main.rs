@@ -1086,10 +1086,16 @@ enum AuditCommands {
 
 /// Bench endpoint unification (CLI-2's second half): `--endpoint` was bench's
 /// private URL flag, silently ignoring `--url`/`KNISHIO_URL`/knishio.toml.
-/// It now defaults to the resolved target URL and warns when passed. Bench
-/// submits molecules — a mutation — so non-local targets confirm (or --yes).
+/// It now defaults to the resolved target URL and warns when passed.
+///
+/// Also prints bench's honest TARGET banners (CLI-3): the HTTP submit target
+/// AND the `cell_admin` psql/ssh transport it uses to create/purge the
+/// BENCH_CLI_* cell — bench is dual-transport, so a single blanket banner
+/// would misname one of them. Bench submits molecules (a mutation), so a
+/// non-local target confirms (or --yes).
 fn resolve_bench_endpoint(
     endpoint: Option<String>,
+    cell_admin: &psql::PsqlTransport,
     cfg: &config::Config,
     yes: bool,
 ) -> Result<String> {
@@ -1099,13 +1105,20 @@ fn resolve_bench_endpoint(
                 "--endpoint is deprecated; use the global --url (or KNISHIO_URL). \
                  Honoring it for this run.",
             );
-            if e != cfg.validator.url {
-                target::banner_transport(&format!("{} (--endpoint, deprecated)", e));
-            }
+            target::banner_transport(&format!("submit: {} (--endpoint, deprecated)", e));
             e
         }
-        None => cfg.validator.url.clone(),
+        None => {
+            let u = cfg.validator.url.clone();
+            target::banner_http(&u, cfg.url_source);
+            u
+        }
     };
+    // The cell-admin transport is only worth naming when it differs from the
+    // submit endpoint's machine (i.e. a remote --host psql/ssh).
+    if !cell_admin.is_local() {
+        target::banner_transport(&format!("cells: {}", cell_admin.describe()));
+    }
     target::confirm_mutation(
         "submit benchmark molecules",
         &endpoint,
@@ -1150,8 +1163,13 @@ fn banner_kind(cmd: &Commands) -> BannerKind {
         | Commands::Db
         | Commands::Metrics { .. }
         | Commands::Watch { .. }
-        | Commands::Verify { .. }
-        | Commands::Bench { .. } => BannerKind::Http,
+        | Commands::Verify { .. } => BannerKind::Http,
+
+        // Bench is variable-transport: run/execute submit HTTP AND admin cells
+        // over the --host psql/ssh transport; clean is pure cell-admin; generate
+        // is pure-local. A single blanket banner can't tell the truth (CLI-3),
+        // so each bench arm prints its own precise banner(s) after resolving.
+        Commands::Bench { .. } => BannerKind::Silent,
 
         // Local postgres via docker exec psql (remote transport lands in 0.2.0's
         // psql layer; until a --host is given these are inherently local).
@@ -1455,7 +1473,12 @@ async fn main() -> Result<()> {
                     token_amount,
                     output: String::new(), // filled by run()
                 };
-                let endpoint = resolve_bench_endpoint(endpoint, &cfg, yes)?;
+                let host_eff = if local { None } else { host.as_deref() };
+                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
+                    .map_err(|e| anyhow::anyhow!(
+                        "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
+                         DATABASE — a remote endpoint needs --host <user@host> too."))?;
+                let endpoint = resolve_bench_endpoint(endpoint, &cell_admin, &cfg, yes)?;
                 let exec_args = bench::execute::ExecuteArgs {
                     plan: String::new(), // filled by run()
                     endpoint: Some(endpoint),
@@ -1464,14 +1487,8 @@ async fn main() -> Result<()> {
                     concurrency,
                     cell_slug,
                     csv: None,
-                    plot: None,
                     insecure_tls: cfg.validator.insecure_tls,
                 };
-                let host_eff = if local { None } else { host.as_deref() };
-                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
-                    .map_err(|e| anyhow::anyhow!(
-                        "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
-                         DATABASE — a remote endpoint needs --host <user@host> too."))?;
                 bench::run(gen_args, exec_args, &cfg, &cell_admin, keep).await?;
             }
             BenchCommands::Generate {
@@ -1504,7 +1521,12 @@ async fn main() -> Result<()> {
                 cell_slug,
                 keep,
             } => {
-                let endpoint = resolve_bench_endpoint(endpoint, &cfg, yes)?;
+                let host_eff = if local { None } else { host.as_deref() };
+                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
+                    .map_err(|e| anyhow::anyhow!(
+                        "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
+                         DATABASE — a remote endpoint needs --host <user@host> too."))?;
+                let endpoint = resolve_bench_endpoint(endpoint, &cell_admin, &cfg, yes)?;
                 let exec_args = bench::execute::ExecuteArgs {
                     plan,
                     endpoint: Some(endpoint),
@@ -1513,19 +1535,16 @@ async fn main() -> Result<()> {
                     concurrency,
                     cell_slug,
                     csv: None,
-                    plot: None,
                     insecure_tls: cfg.validator.insecure_tls,
                 };
-                let host_eff = if local { None } else { host.as_deref() };
-                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
-                    .map_err(|e| anyhow::anyhow!(
-                        "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
-                         DATABASE — a remote endpoint needs --host <user@host> too."))?;
                 bench::execute(exec_args, &cfg, &cell_admin, keep).await?;
             }
             BenchCommands::Clean { cell_slug, all } => {
                 let host_eff = if local { None } else { host.as_deref() };
                 let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)?;
+                // Clean is pure cell-admin (no HTTP) — name the psql/ssh transport
+                // honestly (CLI-3: the blanket Http banner used to claim localhost).
+                target::banner_transport(&cell_admin.describe());
                 target::confirm_mutation("purge benchmark cells", &cell_admin.describe(), cell_admin.is_local(), yes)?;
                 bench::clean(&cell_admin, cell_slug.as_deref(), all).await?;
             }

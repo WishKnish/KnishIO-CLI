@@ -8,7 +8,6 @@ use rusqlite::Connection;
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use super::plot;
 
 // ═══════════════════════════════════════════════════════════════
 // Public Args & Types
@@ -23,7 +22,6 @@ pub struct ExecuteArgs {
     pub concurrency: usize,
     pub cell_slug: Option<String>,
     pub csv: Option<String>,
-    pub plot: Option<String>,
     pub insecure_tls: bool,
 }
 
@@ -820,15 +818,9 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
     std::fs::write(&csv_path, &csv)
         .with_context(|| format!("Failed to write latency CSV to {csv_path}"))?;
     println!(" Latency CSV written to: {csv_path}");
-
-    // Render latency plot PNG
-    let plot_path = args
-        .plot
-        .unwrap_or_else(|| csv_path.replace(".csv", "-plot.png"));
-    match plot::render_latency_plot(&all_results, &plot_path) {
-        Ok(()) => println!(" Latency plot written to: {plot_path}"),
-        Err(e) => eprintln!(" Warning: failed to render plot: {e}"),
-    }
+    // Plot the CSV with your own tool (e.g. the repo's Python script) — the
+    // built-in PNG renderer was dropped in 0.2.1 so `cargo install` needs no
+    // system fontconfig (it broke Linux installs + CI).
 
     Ok(())
 }

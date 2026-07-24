@@ -1,6 +1,6 @@
 [package]
 name = "knishio-cli"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "KnishIO validator orchestration CLI — Docker control, cell management, benchmarks, and health checks"
 license = "GPL-3.0-or-later"
@@ -50,13 +50,10 @@ indicatif = "0.17"
 # `{ path = "../../sdks/KnishIO-Client-Rust" }` ONLY while testing an
 # unpublished SDK change, then revert before shipping. Guard lives in
 # servers/knishio-validator-rust/Makefile → `check-no-path-dep`.
-knishio-client = "0.9.2"
+knishio-client = "0.9.3"
 
 # SQLite for benchmark fixture storage
 rusqlite = { version = "0.31", features = ["bundled"] }
-
-# Latency plot rendering (benchmark PNG output)
-plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "line_series", "bitmap_encoder", "ttf"] }
 
 # Random number generation (benchmark endpoint selection)
 rand = "0.8"
