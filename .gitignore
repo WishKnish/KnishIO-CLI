@@ -1,6 +1,7 @@
 # Rust
 target/
-Cargo.lock
+# Cargo.lock is COMMITTED for this binary crate (reproducible builds + CD).
+# (Un-ignored 0.2.0; see F-12 in the validator's TESTNET-DEPLOY audit.)
 **/*.rs.bk
 *.pdb
 

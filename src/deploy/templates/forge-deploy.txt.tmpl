@@ -1,0 +1,7 @@
+$CREATE_RELEASE()
+
+cd $FORGE_RELEASE_DIRECTORY
+
+bash /home/{{DEPLOY_USER}}/knishio-deploy-build.sh || exit 1
+
+$ACTIVATE_RELEASE()

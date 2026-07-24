@@ -150,7 +150,7 @@ pub async fn list() -> Result<()> {
         .filter(|e| {
             e.path()
                 .extension()
-                .map_or(false, |ext| ext == "sql" || ext == "gz")
+                .is_some_and(|ext| ext == "sql" || ext == "gz")
         })
         .collect();
 

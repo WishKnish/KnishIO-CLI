@@ -7,11 +7,8 @@
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use std::process::Stdio;
-use tokio::process::Command;
 
 use crate::cell::{validate_bundle, validate_slug};
-use crate::config::Config;
 use crate::output;
 
 const DEFAULT_LIMIT: u32 = 50;
@@ -44,7 +41,7 @@ impl Default for ListFilters {
 }
 
 /// Run a SELECT against audit_events and pretty-print the results.
-pub async fn list(config: &Config, filters: ListFilters) -> Result<()> {
+pub async fn list(t: &crate::psql::PsqlTransport, filters: ListFilters) -> Result<()> {
     if filters.limit == 0 || filters.limit > MAX_LIMIT {
         bail!("--limit must be between 1 and {}", MAX_LIMIT);
     }
@@ -102,7 +99,7 @@ pub async fn list(config: &Config, filters: ListFilters) -> Result<()> {
         filters.limit
     );
 
-    let raw = psql(config, &sql).await?;
+    let raw = psql(t, &sql).await?;
 
     if raw.trim().is_empty() {
         output::info("No audit events match the given filters.");
@@ -114,8 +111,8 @@ pub async fn list(config: &Config, filters: ListFilters) -> Result<()> {
     output::header(&format!("Audit Events ({})", descriptor));
 
     println!(
-        "{:<14} {:<8} {:<14} {:<24} {:<14} {:<16} {}",
-        "AGE", "SEVERITY", "CATEGORY", "ACTION", "CELL", "BUNDLE", "TARGET"
+        "{:<14} {:<8} {:<14} {:<24} {:<14} {:<16} TARGET",
+        "AGE", "SEVERITY", "CATEGORY", "ACTION", "CELL", "BUNDLE"
     );
     println!("{}", "-".repeat(120));
 
@@ -267,41 +264,12 @@ fn esc(s: &str) -> String {
 
 /// Local copy of the psql shell-out helper (mirrors the pattern in cell.rs /
 /// embed.rs). Keeps the per-module SQL plumbing self-contained.
-async fn psql(config: &Config, sql: &str) -> Result<String> {
-    let out = Command::new("docker")
-        .args([
-            "exec",
-            &config.docker.postgres_container,
-            "psql",
-            "-U",
-            &config.database.user,
-            "-d",
-            &config.database.name,
-            "-q",
-            "-t",
-            "-A",
-            "-c",
-            sql,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to exec into postgres container — is the stack running?")?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("does not exist") {
-            anyhow::bail!(
-                "audit_events table missing — has the validator started and run migrations?"
-            );
-        }
-        if stderr.contains("connection refused") || stderr.contains("could not connect") {
-            anyhow::bail!("Cannot connect to database — is the stack running?");
-        }
-        anyhow::bail!("psql query failed: {}", stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+async fn psql(t: &crate::psql::PsqlTransport, sql: &str) -> Result<String> {
+    t.exec_with_hint(
+        sql,
+        "audit_events table missing — has the validator started and run migrations?",
+    )
+    .await
 }
 
 #[cfg(test)]

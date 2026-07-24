@@ -132,12 +132,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
 
 /// Extract the next ContinuID position from a molecule's remainder wallet.
 fn advance_chain(mol: &Molecule) -> Result<String> {
-    mol.remainder_wallet
-        .as_ref()
-        .context("Molecule has no remainder_wallet")?
-        .position
-        .clone()
-        .context("Remainder wallet has no position")
+    super::molecules::next_position(mol)
 }
 
 /// Generate a fresh random OTS position (64-char hex). KnishIO positions are
@@ -196,24 +191,7 @@ fn insert_mol(
 
 /// Create an auth molecule (U+I). Auto-adds I-atom.
 fn make_auth(secret: &str, bundle: &str) -> Result<Molecule> {
-    let auth_wallet = Wallet::create(Some(secret), None, "AUTH", None, None)
-        .context("Failed to create auth wallet")?;
-
-    let mut mol = Molecule::with_params(
-        Some(secret.to_string()),
-        Some(bundle.to_string()),
-        Some(auth_wallet),
-        None,
-        Some(FIXTURE_CELL_SLUG.to_string()),
-        None,
-    );
-
-    mol.init_authorization(vec![MetaItem::new("pubkey", "bench-pubkey")])
-        .context("Failed to init authorization")?;
-    mol.sign(Some(bundle.to_string()), false, false)
-        .context("Failed to sign auth molecule")?;
-
-    Ok(mol)
+    super::molecules::make_auth(secret, bundle, FIXTURE_CELL_SLUG)
 }
 
 /// Create a meta molecule (M+I). Auto-adds I-atom.
@@ -226,37 +204,23 @@ fn make_meta(
     meta_idx: usize,
     meta_type: &str,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None)
-        .context("Failed to create meta wallet")?;
-
-    let mut mol = Molecule::with_params(
-        Some(secret.to_string()),
-        Some(bundle.to_string()),
-        Some(source_wallet),
-        None,
-        Some(FIXTURE_CELL_SLUG.to_string()),
-        None,
-    );
-
     let type_seq = meta_idx / BENCH_META_TYPES.len();
     let id_slot = type_seq % META_IDS_PER_TYPE;
     let meta_id = format!("bench-{meta_type}-{identity_idx}-{id_slot}");
-    mol.init_meta(
-        vec![
-            MetaItem::new("iteration", &meta_idx.to_string()),
-            MetaItem::new("benchmark", "true"),
-            MetaItem::new("identity", &identity_idx.to_string()),
-            MetaItem::new("metaType", meta_type),
-        ],
+    super::molecules::make_meta_custom(
+        secret,
+        bundle,
+        position,
+        FIXTURE_CELL_SLUG,
         meta_type,
         &meta_id,
-        None,
+        vec![
+            MetaItem::new("iteration", meta_idx.to_string()),
+            MetaItem::new("benchmark", "true"),
+            MetaItem::new("identity", identity_idx.to_string()),
+            MetaItem::new("metaType", meta_type),
+        ],
     )
-    .context("Failed to init meta")?;
-    mol.sign(Some(bundle.to_string()), false, false)
-        .context("Failed to sign meta molecule")?;
-
-    Ok(mol)
 }
 
 /// Create a token-create molecule (C + I) that mints the initial supply to a
@@ -305,7 +269,7 @@ fn make_token_create(
         &recipient_wallet,
         amount,
         vec![
-            MetaItem::new("name", &format!("Bench Token {token_slug}")),
+            MetaItem::new("name", format!("Bench Token {token_slug}")),
             MetaItem::new("fungibility", "fungible"),
             MetaItem::new("supply", "replenishable"),
             MetaItem::new("decimals", "0"),

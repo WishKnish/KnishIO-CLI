@@ -6,6 +6,7 @@
 
 pub mod execute;
 pub mod generate;
+pub(crate) mod molecules;
 pub mod plot;
 
 use anyhow::{Context, Result};
@@ -61,13 +62,15 @@ pub fn generate(args: generate::GenerateArgs) -> Result<()> {
 pub async fn execute(
     args: execute::ExecuteArgs,
     config: &Config,
+    cell_admin: &crate::psql::PsqlTransport,
     keep: bool,
 ) -> Result<()> {
+    let _ = config; // retained for future non-cell uses
     // Resolve cell slug — always in the BENCH_CLI_ namespace for safety.
     let slug = resolve_cell_slug(args.cell_slug.as_deref())?;
 
     // Ensure cell exists on the validator before injection
-    cell::create(config, &slug, Some("Benchmark Cell"), "active").await?;
+    cell::create(cell_admin, &slug, Some("Benchmark Cell"), "active").await?;
 
     output::info(&format!("Executing benchmark plan: {}", args.plan));
     let exec_args = execute::ExecuteArgs {
@@ -87,7 +90,7 @@ pub async fn execute(
     // Auto-cleanup benchmark data (reports already saved to disk)
     if !keep {
         output::info(&format!("Cleaning up benchmark cell '{}'...", slug));
-        cell::purge(config, &slug).await?;
+        cell::purge(cell_admin, &slug).await?;
     }
 
     Ok(())
@@ -98,6 +101,7 @@ pub async fn run(
     gen_args: generate::GenerateArgs,
     exec_args: execute::ExecuteArgs,
     config: &Config,
+    cell_admin: &crate::psql::PsqlTransport,
     keep: bool,
 ) -> Result<()> {
     let plan_path = format!("bench-plan-{}.db", std::process::id());
@@ -127,7 +131,7 @@ pub async fn run(
         plot: exec_args.plot,
         insecure_tls: exec_args.insecure_tls,
     };
-    execute(exec, config, keep).await?;
+    execute(exec, config, cell_admin, keep).await?;
 
     // Clean up temp plan file
     let _ = std::fs::remove_file(&plan_path);
@@ -136,18 +140,18 @@ pub async fn run(
 }
 
 /// Purge benchmark data for a specific cell or all BENCH_CLI_* cells.
-pub async fn clean(config: &Config, cell_slug: Option<&str>, all: bool) -> Result<()> {
+pub async fn clean(cell_admin: &crate::psql::PsqlTransport, cell_slug: Option<&str>, all: bool) -> Result<()> {
     if let Some(slug) = cell_slug {
-        cell::purge(config, slug).await?;
+        cell::purge(cell_admin, slug).await?;
     } else if all {
-        let slugs = cell::list_bench_slugs(config).await?;
+        let slugs = cell::list_bench_slugs(cell_admin).await?;
         if slugs.is_empty() {
             output::info("No active benchmark cells found");
             return Ok(());
         }
         output::info(&format!("Purging {} benchmark cell(s)...", slugs.len()));
         for slug in &slugs {
-            cell::purge(config, slug).await?;
+            cell::purge(cell_admin, slug).await?;
         }
     } else {
         output::error("Specify --cell-slug <SLUG> or --all");

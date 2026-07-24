@@ -7,17 +7,12 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use crate::config::Config;
 use crate::output;
 
 fn http_client(insecure_tls: bool) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
-    if insecure_tls {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    builder.build().context("Failed to build HTTP client")
+    crate::http::client(insecure_tls, crate::http::DEFAULT_TIMEOUT)
 }
 
 pub async fn export(config: &Config, format: &str, output_path: Option<PathBuf>) -> Result<()> {

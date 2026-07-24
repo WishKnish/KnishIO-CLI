@@ -42,37 +42,13 @@ fn validate_model_name(name: &str) -> Result<()> {
 
 /// Execute a SQL statement inside the Postgres container.
 async fn psql(config: &Config, sql: &str) -> Result<String> {
-    let out = Command::new("docker")
-        .args([
-            "exec",
-            &config.docker.postgres_container,
-            "psql",
-            "-U",
-            &config.database.user,
-            "-d",
-            &config.database.name,
-            "-t",
-            "-A",
-            "-c",
-            sql,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to exec into postgres container — is the stack running?")?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("does not exist") {
-            anyhow::bail!("Database operation failed — run `knishio db` to check consistency");
-        } else if stderr.contains("connection refused") || stderr.contains("could not connect") {
-            anyhow::bail!("Cannot connect to database — is the stack running?");
-        } else {
-            anyhow::bail!("Database operation failed (run with RUST_LOG=debug for details)");
-        }
+    crate::psql::PsqlTransport::DockerExec {
+        container: config.docker.postgres_container.clone(),
+        user: config.database.user.clone(),
+        db: config.database.name.clone(),
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    .exec(sql)
+    .await
 }
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -129,11 +105,7 @@ fn http_client(insecure_tls: bool) -> Result<reqwest::Client> {
 
 /// Build an HTTP client with custom timeout and optional TLS bypass.
 fn http_client_with_timeout(insecure_tls: bool, timeout: Duration) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().timeout(timeout);
-    if insecure_tls {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    builder.build().context("Failed to build HTTP client")
+    crate::http::client(insecure_tls, timeout)
 }
 
 /// Truncate a string for display, appending "..." if longer than max_len.
@@ -640,8 +612,8 @@ pub async fn search(
         results.len()
     ));
     println!(
-        "{:<6} {:<16} {:<20} {:<12} {:<40} {}",
-        "SCORE", "TYPE", "ID", "KEY", "VALUE", "MOLECULE"
+        "{:<6} {:<16} {:<20} {:<12} {:<40} MOLECULE",
+        "SCORE", "TYPE", "ID", "KEY", "VALUE"
     );
     println!("{}", "-".repeat(100));
 
@@ -993,8 +965,8 @@ fn display_sources(sources: &[AskDagSource]) {
     println!();
     output::header(&format!("Sources ({} records)", sources.len()));
     println!(
-        "{:<6} {:<16} {:<20} {:<12} {:<40} {}",
-        "SCORE", "TYPE", "ID", "KEY", "VALUE", "MOLECULE"
+        "{:<6} {:<16} {:<20} {:<12} {:<40} MOLECULE",
+        "SCORE", "TYPE", "ID", "KEY", "VALUE"
     );
     println!("{}", "-".repeat(100));
 

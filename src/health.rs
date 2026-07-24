@@ -1,20 +1,13 @@
 //! Health check endpoints via HTTP.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 use serde_json::Value;
-use std::time::Duration;
 
 use crate::output;
 
 fn client(insecure_tls: bool) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
-
-    if insecure_tls {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-
-    builder.build().context("Failed to build HTTP client")
+    crate::http::client(insecure_tls, crate::http::DEFAULT_TIMEOUT)
 }
 
 async fn get_endpoint(

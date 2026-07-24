@@ -72,11 +72,13 @@ mod backup;
 mod bench;
 mod cell;
 mod config;
+mod deploy;
 mod detect;
 mod dmr;
 mod docker;
 mod embed;
 mod health;
+mod http;
 mod init;
 mod metrics;
 mod osmosis;
@@ -84,10 +86,14 @@ mod output;
 mod p2p;
 mod package;
 mod paths;
+mod psql;
 mod schema;
+mod target;
 mod update;
 mod vconfig;
+mod verify;
 mod watch;
+mod ws;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -109,9 +115,36 @@ use crate::detect::Accel;
 )]
 struct Cli {
     /// Validator base URL for all HTTP + WS subcommands (health, ready,
-    /// full, db, ai, metrics, watch, embed).
-    #[arg(long, global = true, default_value = "https://localhost:8080")]
-    url: String,
+    /// full, db, ai, metrics, watch, embed, bench, verify). Precedence:
+    /// this flag > KNISHIO_URL env > knishio.toml > https://localhost:8080.
+    /// Every command prints a TARGET banner naming the URL (or the real
+    /// transport, for commands that don't speak HTTP) and why it won.
+    #[arg(long, global = true)]
+    url: Option<String>,
+
+    /// Skip confirmation prompts for mutating commands aimed at non-local
+    /// targets. Non-interactive sessions REQUIRE this to run such commands.
+    #[arg(long, global = true)]
+    yes: bool,
+
+    /// Stack profile for docker lifecycle commands: "dev" (standalone base;
+    /// dev secrets, permissive CORS, rate limiting off) or "production"
+    /// (production.yml base; KNISHIO_ENV=production, _FILE secrets, TLS,
+    /// rate limiting). Overrides `[docker] profile` in knishio.toml.
+    #[arg(long, global = true)]
+    profile: Option<String>,
+
+    /// Remote host (user@host) for database-side commands (cell, audit):
+    /// runs psql on the server over ssh (`sudo -u postgres psql`, using the
+    /// scoped sudoers grant installed by `deploy bootstrap`). Defaults from
+    /// `[deploy] host` in knishio.toml.
+    #[arg(long, global = true, conflicts_with = "local")]
+    host: Option<String>,
+
+    /// Explicitly target the LOCAL docker stack for database-side commands
+    /// even when the validator URL points at a remote host.
+    #[arg(long, global = true)]
+    local: bool,
 
     /// Accept self-signed TLS certs from the validator. Mirrors curl's
     /// `--insecure`: the *server* keeps running HTTPS as always; this flag
@@ -398,6 +431,43 @@ enum Commands {
         raw: bool,
     },
 
+    /// Deployment orchestration: generate (and optionally execute) the
+    /// bare-metal deployment artifacts validated on testnet.knish.io —
+    /// bootstrap script, production env, nginx edge configs, Forge CD pair,
+    /// ship + upgrade over ssh.
+    Deploy {
+        #[command(subcommand)]
+        command: DeployCommands,
+    },
+
+    /// Run the deployment acceptance gauntlet against the target validator:
+    /// liveness/readiness (migrations applied == expected), GraphQL, WebSocket
+    /// subscriptions on /graphql/ws AND /ws, unbuffered SSE, edge hardening
+    /// (HSTS, http→https redirect, /metrics + /config blocked), rate-limit
+    /// headers, TLS certificate health. Exit 1 on any failure.
+    Verify {
+        /// Check profile: auto (edge for remote targets, direct for local),
+        /// edge (all checks), direct (skip edge-hardening checks).
+        #[arg(long, default_value = "auto")]
+        edge: String,
+
+        /// Emit the full report as JSON on stdout (meta stays on stderr).
+        #[arg(long)]
+        json: bool,
+
+        /// Also run the write-path smoke: ephemeral identity → U-isotope auth
+        /// → OTS-signed createMeta → readback. MUTATES the target (leaves one
+        /// KNISHIO_VERIFY_SMOKE meta molecule); confirmation-gated for
+        /// non-local targets.
+        #[arg(long)]
+        write_smoke: bool,
+
+        /// Cell slug for the write smoke (must exist, be active, and allow
+        /// guest/open auth).
+        #[arg(long, default_value = "public")]
+        smoke_cell: String,
+    },
+
     /// Print a shell completion script. Redirect to your shell's
     /// completion directory, e.g.
     ///   knishio completions zsh > ~/.zsh/completion/_knishio
@@ -426,10 +496,105 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = PackageTarget::All)]
         target: PackageTarget,
 
+        /// Linux target architecture(s): arm64 (native buildx), amd64
+        /// (emulated builder + file(1) arch gate), or all. Defaults from
+        /// `[deploy] arch`, else arm64.
+        #[arg(long)]
+        arch: Option<String>,
+
         /// Remove the dist/ output directory (runs `make clean`)
         /// instead of packaging.
         #[arg(long, conflicts_with = "target")]
         clean: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeployCommands {
+    /// Generate the idempotent root bootstrap script (runbook §1–§7 + day-2
+    /// timers, every testnet-learned hard gate baked in).
+    Bootstrap {
+        /// Deploy user on the server (also the sudoers grantee).
+        #[arg(long, default_value = "forge")]
+        user: String,
+        /// Validator sits behind a local reverse proxy (SERVER_HOST=127.0.0.1
+        /// + mandatory TRUSTED_PROXY_IPS).
+        #[arg(long)]
+        behind_proxy: bool,
+        /// CORS_ORIGINS value ("*" or comma-separated origins).
+        #[arg(long, default_value = "*")]
+        cors: String,
+        /// Validator port.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Output directory for generated artifacts.
+        #[arg(long, default_value = "deploy-artifacts")]
+        output: PathBuf,
+    },
+    /// Generate /etc/knishio/.env content (production baseline).
+    Env {
+        #[arg(long)]
+        behind_proxy: bool,
+        #[arg(long, default_value = "*")]
+        cors: String,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long, default_value = "deploy-artifacts")]
+        output: PathBuf,
+    },
+    /// Generate the nginx reverse-proxy vhost (generic or Forge flavor).
+    Edge {
+        /// Public domain (defaults from [deploy] domain).
+        #[arg(long)]
+        domain: Option<String>,
+        /// generic | forge
+        #[arg(long, default_value = "generic")]
+        flavor: String,
+        #[arg(long, default_value_t = 8080)]
+        upstream_port: u16,
+        /// Forge server id (the NNNNN in forge-conf/NNNNN/...), forge flavor only.
+        #[arg(long, default_value = "SERVER_ID")]
+        forge_server_id: String,
+        #[arg(long, default_value = "deploy-artifacts")]
+        output: PathBuf,
+    },
+    /// Generate the Forge CD pair: minimal deploy script + server-side build script.
+    Forge {
+        #[arg(long, default_value = "forge")]
+        user: String,
+        /// The repo has Cargo.lock committed (drops the pinned-lock restore line).
+        #[arg(long)]
+        lock_committed: bool,
+        #[arg(long, default_value = "deploy-artifacts")]
+        output: PathBuf,
+    },
+    /// Ship a release tarball to the server (scp + SHAKE256 verified both ends).
+    Ship {
+        /// arm64 | amd64 (defaults from [deploy] arch, else amd64).
+        #[arg(long)]
+        arch: Option<String>,
+        /// Remote staging directory (defaults from [deploy] staging_dir).
+        #[arg(long)]
+        dest: Option<String>,
+        /// Explicit tarball path (default: newest matching dist/ tarball).
+        #[arg(long)]
+        tarball: Option<PathBuf>,
+        /// Actually run the ssh/scp commands (default: print them).
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Run the server's upgrade.sh (pg_dump → swap → restart → /readyz gate →
+    /// auto-rollback) over ssh, or --rollback to the previous binary.
+    Upgrade {
+        /// Remote binary path (default: the shared CARGO_TARGET_DIR release binary).
+        #[arg(long)]
+        binary: Option<String>,
+        /// Restore the previous binary instead of upgrading.
+        #[arg(long)]
+        rollback: bool,
+        /// Actually run over ssh (default: print the command).
+        #[arg(long)]
+        execute: bool,
     },
 }
 
@@ -690,9 +855,10 @@ enum BenchCommands {
         #[arg(long, default_value_t = 1_000_000.0)]
         token_amount: f64,
 
-        /// Validator endpoint URL
-        #[arg(long, default_value = "https://localhost:8080")]
-        endpoint: String,
+        /// DEPRECATED: use the global --url (or KNISHIO_URL). Honored for
+        /// back-compat when passed; defaults to the resolved target URL.
+        #[arg(long)]
+        endpoint: Option<String>,
 
         /// Concurrency level
         #[arg(long, default_value_t = 5)]
@@ -747,9 +913,10 @@ enum BenchCommands {
         /// Path to the plan file
         plan: String,
 
-        /// Validator endpoint URL
-        #[arg(long, default_value = "https://localhost:8080")]
-        endpoint: String,
+        /// DEPRECATED: use the global --url (or KNISHIO_URL). Honored for
+        /// back-compat when passed; defaults to the resolved target URL.
+        #[arg(long)]
+        endpoint: Option<String>,
 
         /// Concurrency level
         #[arg(long, default_value_t = 5)]
@@ -917,6 +1084,103 @@ enum AuditCommands {
     },
 }
 
+/// Bench endpoint unification (CLI-2's second half): `--endpoint` was bench's
+/// private URL flag, silently ignoring `--url`/`KNISHIO_URL`/knishio.toml.
+/// It now defaults to the resolved target URL and warns when passed. Bench
+/// submits molecules — a mutation — so non-local targets confirm (or --yes).
+fn resolve_bench_endpoint(
+    endpoint: Option<String>,
+    cfg: &config::Config,
+    yes: bool,
+) -> Result<String> {
+    let endpoint = match endpoint {
+        Some(e) => {
+            output::warn(
+                "--endpoint is deprecated; use the global --url (or KNISHIO_URL). \
+                 Honoring it for this run.",
+            );
+            if e != cfg.validator.url {
+                target::banner_transport(&format!("{} (--endpoint, deprecated)", e));
+            }
+            e
+        }
+        None => cfg.validator.url.clone(),
+    };
+    target::confirm_mutation(
+        "submit benchmark molecules",
+        &endpoint,
+        target::is_local_url(&endpoint),
+        yes,
+    )?;
+    Ok(endpoint)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Target banner classification
+// ═══════════════════════════════════════════════════════════════
+
+/// Which TARGET banner a command gets. Honest transport labeling is the
+/// CLI-2 fix's first half: `--url` must never *appear* to aim a command
+/// that doesn't speak HTTP.
+enum BannerKind {
+    /// Effects land on the validator HTTP API at `cfg.validator.url`.
+    Http,
+    /// Effects land in the LOCAL postgres container via `docker exec psql`.
+    DockerPsql,
+    /// Effects land on the LOCAL docker compose stack.
+    Compose,
+    /// No external target (pure-local generation/introspection).
+    Silent,
+}
+
+fn banner_kind(cmd: &Commands) -> BannerKind {
+    match cmd {
+        // HTTP API consumers.
+        Commands::Ai { .. }
+        | Commands::Embed { .. }
+        | Commands::P2p { .. }
+        | Commands::Osmosis { .. }
+        | Commands::Config { .. }
+        | Commands::RateLimit { .. }
+        | Commands::Reconciliation { .. }
+        | Commands::Schema { .. }
+        | Commands::Health { .. }
+        | Commands::Ready
+        | Commands::Full
+        | Commands::Db
+        | Commands::Metrics { .. }
+        | Commands::Watch { .. }
+        | Commands::Verify { .. }
+        | Commands::Bench { .. } => BannerKind::Http,
+
+        // Local postgres via docker exec psql (remote transport lands in 0.2.0's
+        // psql layer; until a --host is given these are inherently local).
+        Commands::Cell { .. }
+        | Commands::Audit { .. }
+        | Commands::Psql { .. }
+        | Commands::Backup { .. }
+        | Commands::Restore { .. } => BannerKind::DockerPsql,
+
+        // Local docker stack lifecycle.
+        Commands::Start { .. }
+        | Commands::Stop { .. }
+        | Commands::Destroy { .. }
+        | Commands::Rebuild { .. }
+        | Commands::Update { .. }
+        | Commands::Logs { .. }
+        | Commands::Status { .. }
+        | Commands::Dmr { .. } => BannerKind::Compose,
+
+        // No target (generators print artifact paths; ship/upgrade print
+        // their ssh target explicitly in their own output).
+        Commands::Detect
+        | Commands::Init { .. }
+        | Commands::Completions { .. }
+        | Commands::Package { .. }
+        | Commands::Deploy { .. } => BannerKind::Silent,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════
@@ -927,7 +1191,9 @@ async fn main() -> Result<()> {
     let cwd = env::current_dir()?;
 
     // Load config: file -> env vars -> CLI flags
-    let mut cfg = config::Config::load(&cwd).with_url_override(&cli.url);
+    let mut cfg = config::Config::load(&cwd);
+    cfg.apply_url_flag(cli.url.as_deref());
+    cfg.apply_profile_flag(cli.profile.as_deref())?;
 
     // `--insecure` is a per-invocation override of `[validator] insecure_tls`.
     // Mirrors curl's `-k`: server keeps running HTTPS as always; this just
@@ -935,6 +1201,31 @@ async fn main() -> Result<()> {
     if cli.insecure {
         cfg.validator.insecure_tls = true;
     }
+
+    // Effective ssh host for database-side commands: flag > [deploy] host.
+    let host: Option<String> = cli.host.clone().or_else(|| cfg.deploy.host.clone());
+
+    // TARGET banner: every command states where its effects actually land —
+    // the HTTP URL, the local docker stack, the local postgres container, or
+    // a remote host over ssh. Commands that mutate a NON-local target
+    // additionally confirm (or --yes).
+    match banner_kind(&cli.command) {
+        BannerKind::Http => target::banner_http(&cfg.validator.url, cfg.url_source),
+        BannerKind::DockerPsql => match &host {
+            Some(h) if !cli.local => target::banner_transport(&format!(
+                "ssh://{} (sudo -u postgres psql)",
+                h
+            )),
+            _ => target::banner_transport(&format!(
+                "docker://{} (docker exec psql — local stack)",
+                cfg.docker.postgres_container
+            )),
+        },
+        BannerKind::Compose => target::banner_transport("docker compose (local stack)"),
+        BannerKind::Silent => {}
+    }
+    let yes = cli.yes;
+    let local = cli.local;
 
     match cli.command {
         // ── Detect (no docker dispatch) ─────────────────────
@@ -990,6 +1281,19 @@ async fn main() -> Result<()> {
             accel,
             gen_model,
         } => {
+            // Hybrid guard (CLI-2 class): update restarts the LOCAL docker
+            // stack but health-gates cfg.validator.url. A non-local URL means
+            // the gate would watch one machine while restarting another.
+            if !target::is_local_url(&cfg.validator.url) {
+                anyhow::bail!(
+                    "`update` restarts the LOCAL docker stack, but the validator URL \
+                     is non-local ({}). It would restart local containers while \
+                     health-checking a remote host. For remote upgrades use \
+                     `knishio deploy upgrade --host <user@host>`; for the local \
+                     stack drop --url/KNISHIO_URL.",
+                    cfg.validator.url
+                );
+            }
             // update module still takes a single compose file; reuse the first
             // (base) file in the resolved chain so back-compat is preserved.
             let (accel, files) = resolve_accel_and_files(&cwd, &cfg, accel)?;
@@ -1033,65 +1337,78 @@ async fn main() -> Result<()> {
         },
 
         // ── Cell management ─────────────────────────────────
-        Commands::Cell { command } => match command {
+        Commands::Cell { command } => {
+            // --local wins over a [deploy] host default; the --host FLAG
+            // conflicts with --local at the clap level.
+            let host_eff = if local { None } else { host.as_deref() };
+            let t = psql::PsqlTransport::resolve(&cfg, host_eff, local)?;
+            let mutating = !matches!(
+                command,
+                CellCommands::List | CellCommands::Show { .. } | CellCommands::Usage { .. }
+            );
+            if mutating {
+                target::confirm_mutation("modify cells", &t.describe(), t.is_local(), yes)?;
+            }
+            match command {
             CellCommands::Create { slug, name, status, mode, authorize, admin } => {
-                cell::create(&cfg, &slug, name.as_deref(), &status).await?;
+                cell::create(&t, &slug, name.as_deref(), &status).await?;
                 // Seed access state if any non-default flag was supplied.
                 if mode.as_str() != "open" || !authorize.is_empty() || !admin.is_empty() {
-                    cell::set_mode(&cfg, &slug, mode.as_str()).await?;
+                    cell::set_mode(&t, &slug, mode.as_str()).await?;
                     for bundle in &authorize {
-                        cell::grant(&cfg, &slug, bundle).await?;
+                        cell::grant(&t, &slug, bundle).await?;
                     }
                     for bundle in &admin {
-                        cell::add_admin(&cfg, &slug, bundle).await?;
+                        cell::add_admin(&t, &slug, bundle).await?;
                     }
                 }
             }
             CellCommands::List => {
-                cell::list(&cfg).await?;
+                cell::list(&t).await?;
             }
             CellCommands::Show { slug } => {
-                cell::show(&cfg, &slug).await?;
+                cell::show(&t, &slug).await?;
             }
             CellCommands::Usage { slug } => {
-                cell::usage(&cfg, slug).await?;
+                cell::usage(&t, slug).await?;
             }
             CellCommands::SetMode { slug, mode } => {
-                cell::set_mode(&cfg, &slug, mode.as_str()).await?;
+                cell::set_mode(&t, &slug, mode.as_str()).await?;
             }
             CellCommands::SetAllowGuest { slug, allow } => {
-                cell::set_allow_guest(&cfg, &slug, allow).await?;
+                cell::set_allow_guest(&t, &slug, allow).await?;
             }
             CellCommands::Grant { slug, bundle, from_file } => {
                 match (bundle, from_file) {
-                    (Some(b), None) => cell::grant(&cfg, &slug, &b).await?,
-                    (None, Some(p)) => cell::grant_from_file(&cfg, &slug, &p).await?,
+                    (Some(b), None) => cell::grant(&t, &slug, &b).await?,
+                    (None, Some(p)) => cell::grant_from_file(&t, &slug, &p).await?,
                     (None, None) => unreachable!("clap required_unless_present"),
                     (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
                 }
             }
             CellCommands::Revoke { slug, bundle } => {
-                cell::revoke(&cfg, &slug, &bundle).await?;
+                cell::revoke(&t, &slug, &bundle).await?;
             }
             CellCommands::AddAdmin { slug, bundle, from_file } => {
                 match (bundle, from_file) {
-                    (Some(b), None) => cell::add_admin(&cfg, &slug, &b).await?,
-                    (None, Some(p)) => cell::add_admin_from_file(&cfg, &slug, &p).await?,
+                    (Some(b), None) => cell::add_admin(&t, &slug, &b).await?,
+                    (None, Some(p)) => cell::add_admin_from_file(&t, &slug, &p).await?,
                     (None, None) => unreachable!("clap required_unless_present"),
                     (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
                 }
             }
             CellCommands::RemoveAdmin { slug, bundle } => {
-                cell::remove_admin(&cfg, &slug, &bundle).await?;
+                cell::remove_admin(&t, &slug, &bundle).await?;
             }
             CellCommands::Activate { slug } => {
-                cell::set_status(&cfg, &slug, "active").await?;
+                cell::set_status(&t, &slug, "active").await?;
             }
             CellCommands::Pause { slug } => {
-                cell::set_status(&cfg, &slug, "paused").await?;
+                cell::set_status(&t, &slug, "paused").await?;
             }
             CellCommands::Archive { slug } => {
-                cell::set_status(&cfg, &slug, "archived").await?;
+                cell::set_status(&t, &slug, "archived").await?;
+            }
             }
         },
 
@@ -1138,6 +1455,7 @@ async fn main() -> Result<()> {
                     token_amount,
                     output: String::new(), // filled by run()
                 };
+                let endpoint = resolve_bench_endpoint(endpoint, &cfg, yes)?;
                 let exec_args = bench::execute::ExecuteArgs {
                     plan: String::new(), // filled by run()
                     endpoint: Some(endpoint),
@@ -1149,7 +1467,12 @@ async fn main() -> Result<()> {
                     plot: None,
                     insecure_tls: cfg.validator.insecure_tls,
                 };
-                bench::run(gen_args, exec_args, &cfg, keep).await?;
+                let host_eff = if local { None } else { host.as_deref() };
+                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
+                    .map_err(|e| anyhow::anyhow!(
+                        "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
+                         DATABASE — a remote endpoint needs --host <user@host> too."))?;
+                bench::run(gen_args, exec_args, &cfg, &cell_admin, keep).await?;
             }
             BenchCommands::Generate {
                 identities,
@@ -1181,6 +1504,7 @@ async fn main() -> Result<()> {
                 cell_slug,
                 keep,
             } => {
+                let endpoint = resolve_bench_endpoint(endpoint, &cfg, yes)?;
                 let exec_args = bench::execute::ExecuteArgs {
                     plan,
                     endpoint: Some(endpoint),
@@ -1192,10 +1516,18 @@ async fn main() -> Result<()> {
                     plot: None,
                     insecure_tls: cfg.validator.insecure_tls,
                 };
-                bench::execute(exec_args, &cfg, keep).await?;
+                let host_eff = if local { None } else { host.as_deref() };
+                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
+                    .map_err(|e| anyhow::anyhow!(
+                        "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
+                         DATABASE — a remote endpoint needs --host <user@host> too."))?;
+                bench::execute(exec_args, &cfg, &cell_admin, keep).await?;
             }
             BenchCommands::Clean { cell_slug, all } => {
-                bench::clean(&cfg, cell_slug.as_deref(), all).await?;
+                let host_eff = if local { None } else { host.as_deref() };
+                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)?;
+                target::confirm_mutation("purge benchmark cells", &cell_admin.describe(), cell_admin.is_local(), yes)?;
+                bench::clean(&cell_admin, cell_slug.as_deref(), all).await?;
             }
         },
 
@@ -1260,8 +1592,10 @@ async fn main() -> Result<()> {
                 since,
                 limit,
             } => {
+                let host_eff = if local { None } else { host.as_deref() };
+                let t = psql::PsqlTransport::resolve(&cfg, host_eff, local)?;
                 audit::list(
-                    &cfg,
+                    &t,
                     audit::ListFilters {
                         action,
                         category,
@@ -1283,6 +1617,63 @@ async fn main() -> Result<()> {
             } else {
                 health::healthz(&cfg.validator.url, cfg.validator.insecure_tls).await?;
             }
+        }
+        Commands::Deploy { command } => match command {
+            DeployCommands::Bootstrap { user, behind_proxy, cors, port, output } => {
+                deploy::bootstrap(&output, &user, behind_proxy, &cors, port).await?;
+            }
+            DeployCommands::Env { behind_proxy, cors, port, output } => {
+                deploy::env(&output, behind_proxy, &cors, port).await?;
+            }
+            DeployCommands::Edge { domain, flavor, upstream_port, forge_server_id, output } => {
+                let domain = domain
+                    .or_else(|| cfg.deploy.domain.clone())
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "--domain required (or set [deploy] domain in knishio.toml)"))?;
+                deploy::edge(&output, &domain, &flavor, upstream_port, &forge_server_id).await?;
+            }
+            DeployCommands::Forge { user, lock_committed, output } => {
+                deploy::forge(&output, &user, lock_committed).await?;
+            }
+            DeployCommands::Ship { arch, dest, tarball, execute } => {
+                let ship_host = host.clone().ok_or_else(|| anyhow::anyhow!(
+                    "--host <user@host> required (or set [deploy] host in knishio.toml)"))?;
+                let arch = arch
+                    .or_else(|| cfg.deploy.arch.clone())
+                    .unwrap_or_else(|| "amd64".to_string());
+                let dest = dest
+                    .or_else(|| cfg.deploy.staging_dir.clone())
+                    .unwrap_or_else(|| "~/knishio-staging".to_string());
+                if execute {
+                    target::banner_transport(&format!("ssh://{} (scp + hash verify)", ship_host));
+                    target::confirm_mutation(
+                        "upload a release tarball", &ship_host, false, yes)?;
+                }
+                let vdir = package::find_validator_dir(&cwd)?;
+                deploy::ship::ship(&vdir, &ship_host, &arch, &dest, tarball, execute).await?;
+            }
+            DeployCommands::Upgrade { binary, rollback, execute } => {
+                let up_host = host.clone().ok_or_else(|| anyhow::anyhow!(
+                    "--host <user@host> required (or set [deploy] host in knishio.toml)"))?;
+                if execute {
+                    target::banner_transport(&format!("ssh://{} (sudo upgrade.sh)", up_host));
+                    target::confirm_mutation(
+                        if rollback { "roll back the validator binary" }
+                        else { "upgrade the validator binary" },
+                        &up_host, false, yes)?;
+                }
+                let readyz = if crate::target::is_local_url(&cfg.validator.url) {
+                    None
+                } else {
+                    Some(cfg.validator.url.clone())
+                };
+                deploy::upgrade::upgrade(
+                    &up_host, binary.as_deref(), rollback, execute, readyz.as_deref()).await?;
+            }
+        },
+
+        Commands::Verify { edge, json, write_smoke, smoke_cell } => {
+            verify::run(&cfg, &edge, json, write_smoke, &smoke_cell, yes).await?;
         }
         Commands::Ready => {
             health::readyz(&cfg.validator.url, false, cfg.validator.insecure_tls).await?;
@@ -1312,14 +1703,35 @@ async fn main() -> Result<()> {
                 watch::molecules(&cfg, bundle).await?;
             }
         },
-        Commands::Package { target, clean } => {
+        Commands::Package { target, clean, arch } => {
             if clean {
                 package::clean(&cwd).await?;
             } else {
                 match target {
-                    PackageTarget::All => package::package_all(&cwd).await?,
+                    PackageTarget::All => {
+                        let arch = arch.clone().or_else(|| cfg.deploy.arch.clone())
+                            .unwrap_or_else(|| "arm64".to_string());
+                        if arch == "all" {
+                            package::package_all(&cwd).await?;
+                            package::package_linux(&cwd, "amd64").await?;
+                        } else {
+                            package::package_all(&cwd).await?;
+                            if arch != "arm64" {
+                                package::package_linux(&cwd, &arch).await?;
+                            }
+                        }
+                    }
                     PackageTarget::Mac => package::package_mac(&cwd).await?,
-                    PackageTarget::Linux => package::package_linux(&cwd).await?,
+                    PackageTarget::Linux => {
+                        let arch = arch.clone().or_else(|| cfg.deploy.arch.clone())
+                            .unwrap_or_else(|| "arm64".to_string());
+                        if arch == "all" {
+                            package::package_linux(&cwd, "arm64").await?;
+                            package::package_linux(&cwd, "amd64").await?;
+                        } else {
+                            package::package_linux(&cwd, &arch).await?;
+                        }
+                    }
                 }
             }
         }
@@ -1410,14 +1822,16 @@ fn resolve_accel_and_files(
     }
 
     // Resolve overlay chain, with CPU fallback when the chosen profile's
-    // files aren't present on disk.
-    let configured = cfg.accel_files(accel).to_vec();
+    // files aren't present on disk. The stack profile (dev/production) maps
+    // the base file before resolution — CLI-1: production.yml is now a
+    // first-class, reachable base instead of dead config.
+    let configured = cfg.profiled_files(cfg.accel_files(accel));
     if configured.is_empty() {
         output::warn(&format!(
             "accel `{}` has no configured compose files; falling back to cpu",
             accel
         ));
-        let cpu_files = cfg.accel_files(Accel::Cpu).to_vec();
+        let cpu_files = cfg.profiled_files(cfg.accel_files(Accel::Cpu));
         let resolved = paths::find_compose_files(cwd, &cpu_files)?;
         print_stack_line(&cpu_files);
         return Ok((Accel::Cpu, resolved));
@@ -1440,7 +1854,7 @@ fn resolve_accel_and_files(
                 "falling back from `{}` to `cpu`",
                 accel
             ));
-            let cpu_files = cfg.accel_files(Accel::Cpu).to_vec();
+            let cpu_files = cfg.profiled_files(cfg.accel_files(Accel::Cpu));
             let resolved = paths::find_compose_files(cwd, &cpu_files)?;
             print_stack_line(&cpu_files);
             Ok((Accel::Cpu, resolved))

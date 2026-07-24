@@ -174,6 +174,66 @@ For production, `knishio init` generates a `knishio.toml` that points to `docker
 
 `--accel auto` (default) auto-detects the host; any other value forces a specific stack and skips detection. See [Hardware Acceleration](#hardware-acceleration) for the full decision table.
 
+## Deployment orchestration
+
+`knishio deploy` generates the artifacts that stand up a bare-metal validator
+behind a reverse proxy — the exact procedure validated on `testnet.knish.io`,
+with every hard gate from that deployment baked in. Everything is **generated
+for review by default**; ship/upgrade take `--execute` to run their ssh steps.
+
+```bash
+# 1. Build a Linux tarball for the server's arch
+knishio package --target linux --arch amd64
+
+# 2. Generate the deployment artifacts (bootstrap script, env, nginx, CD pair)
+knishio deploy bootstrap --user forge --behind-proxy --cors '*'
+knishio deploy edge --domain testnet.example.com --flavor forge --forge-server-id 12345
+knishio deploy forge --user forge
+
+# 3. Ship the tarball, then run the bootstrap ONCE as root on the server
+knishio deploy ship --host forge@testnet.example.com --arch amd64 --execute
+ssh -t forge@testnet.example.com 'sudo bash ~/knishio-staging/knishio-bootstrap.sh <tarball>'
+
+# 4. Verify the public endpoint end-to-end
+knishio verify --url https://testnet.example.com
+
+# Day-2: push-to-deploy uses the generated Forge CD pair; or upgrade directly:
+knishio deploy upgrade --host forge@testnet.example.com --execute
+knishio deploy upgrade --host forge@testnet.example.com --rollback --execute
+```
+
+The `[deploy]` config section supplies defaults (`host`, `domain`, `arch`,
+`staging_dir`) so the flags above collapse to bare subcommands.
+
+## Targets and safety
+
+Every command prints a `TARGET:` banner naming exactly where its effects land
+— the validator URL (and which of `--url` / `KNISHIO_URL` / `knishio.toml` /
+default won), the local docker container, or the ssh host. Commands that speak
+to the database (`cell`, `audit`) show the docker/ssh transport, **never the
+HTTP URL** — so `--url` can't appear to aim a command it doesn't drive. A
+mutating command aimed at a non-local target asks for confirmation
+(`--yes` to skip; required in non-interactive sessions).
+
+- `--url` — validator base URL (precedence: flag > `KNISHIO_URL` > `knishio.toml` > `https://localhost:8080`).
+- `--profile dev|production` — which docker compose base to run (`production` selects `docker-compose.production.yml`).
+- `--host user@host` — run `cell`/`audit` psql on a remote server over ssh; `--local` forces the local stack.
+
+## `knishio verify`
+
+Runs the deployment acceptance gauntlet against any validator URL — the same
+checks that accepted the first public testnet: liveness/readiness (migrations
+`applied == expected`), GraphQL, WebSocket on both `/graphql/ws` and `/ws`,
+unbuffered SSE, HSTS, http→https redirect, `/metrics` + `/config` blocked at
+the edge, rate-limit headers, TLS expiry. `--json` for CI, `--write-smoke` for
+a full signed write-path check.
+
+```bash
+knishio verify --url https://testnet.example.com          # read-only gauntlet
+knishio verify --url https://testnet.example.com --json   # machine-readable
+knishio verify --write-smoke --smoke-cell public          # + signed createMeta + readback
+```
+
 ## Hardware Acceleration
 
 The CLI auto-detects the host and picks the matching compose stack + env vars so GPU-accelerated inference works without typing the right `-f a.yml -f b.yml` incantations yourself. Every `knishio start / rebuild / stop / status / …` prints the resolved accel, the compose stack being used, and (for DMR) the host-side routing URL — so the active optimization is never a guess.

@@ -3,12 +3,9 @@
 //! Pulls new images (or rebuilds from source), restarts the stack,
 //! waits for /readyz, and rolls back if health check fails.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::process::Command;
-use tokio::time::sleep;
 
 use crate::config::Config;
 use crate::output;
@@ -98,34 +95,14 @@ pub async fn rollback(compose_file: &Path, cfg: &Config) -> Result<()> {
 
 /// Poll /readyz until it returns 200 or timeout is reached.
 async fn wait_for_ready(url: &str, insecure_tls: bool) -> bool {
-    let start = std::time::Instant::now();
-    let readyz_url = format!("{}/readyz", url.trim_end_matches('/'));
-
-    let client = build_client(insecure_tls);
-    let client = match client {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    loop {
-        if start.elapsed() > READYZ_TIMEOUT {
-            return false;
-        }
-
-        match client.get(&readyz_url).send().await {
-            Ok(resp) if resp.status().is_success() => return true,
-            _ => {}
-        }
-
-        sleep(READYZ_INTERVAL).await;
-    }
+    crate::http::wait_for_ready(url, insecure_tls, READYZ_TIMEOUT, READYZ_INTERVAL).await
 }
 
 /// Get the current version from /health endpoint.
 async fn get_version(url: &str, insecure_tls: bool) -> Option<String> {
     let health_url = format!("{}/health", url.trim_end_matches('/'));
 
-    let client = build_client(insecure_tls).ok()?;
+    let client = crate::http::client(insecure_tls, crate::http::SHORT_TIMEOUT).ok()?;
     let resp = client.get(&health_url).send().await.ok()?;
     let body: serde_json::Value = resp.json().await.ok()?;
     body.get("version")
@@ -133,38 +110,11 @@ async fn get_version(url: &str, insecure_tls: bool) -> Option<String> {
         .map(String::from)
 }
 
-/// Build an HTTP client with optional TLS verification skip.
-fn build_client(insecure_tls: bool) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(insecure_tls)
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client")
-}
-
-/// Run a docker compose command, inheriting stdout/stderr.
-/// Auto-detects `.env.production` for production compose files.
+/// Run a docker compose command against a single compose file. Delegates to
+/// the canonical `docker::compose` (BuildKit env + unconditional
+/// `.env.production` auto-detection — the private copy this replaced only
+/// applied the env file when "production" appeared in the file NAME, silently
+/// dropping operator env on dev-named stacks).
 async fn compose(compose_file: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<bool> {
-    let mut cmd = Command::new("docker");
-    cmd.arg("compose").arg("-f").arg(compose_file);
-
-    if let Some(dir) = compose_file.parent() {
-        let env_production = dir.join(".env.production");
-        if env_production.exists() && compose_file.to_string_lossy().contains("production") {
-            cmd.arg("--env-file").arg(&env_production);
-        }
-    }
-
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-
-    let status = cmd
-        .args(args)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run docker compose")?;
-    Ok(status.success())
+    crate::docker::compose(&[compose_file.to_path_buf()], args, env).await
 }

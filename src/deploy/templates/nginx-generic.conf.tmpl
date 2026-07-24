@@ -1,0 +1,96 @@
+# Example L7 reverse-proxy vhost for a validator running plain HTTP behind
+# nginx (TLS terminated at the edge). Companion to the runbook's
+# reverse-proxy section in BARE-METAL-DEPLOYMENT.md.
+#
+# Pair with these validator env settings (/etc/knishio/.env):
+#   SERVER_HOST=127.0.0.1          # bind loopback only — nginx is the sole edge
+#   TRUSTED_PROXY_IPS=127.0.0.1    # rate limiter derives client IP from
+#                                  # X-Forwarded-For; WITHOUT this, all public
+#                                  # traffic shares ONE rate-limit bucket
+#   TLS_ENABLED unset/false        # nginx owns TLS; binary stays plain HTTP
+#
+# NOT covered here: certificate provisioning (certbot / your platform's
+# managed TLS) — plug your cert paths into the ssl_certificate lines.
+
+# WebSocket upgrade handling for GraphQL subscriptions.
+# `map` must live at http scope (conf.d/sites-enabled files are included there).
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Port 80: redirect everything to HTTPS (the binary has no redirect logic).
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{DOMAIN}};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    http2 on;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {{DOMAIN}};
+    server_tokens off;
+
+    ssl_certificate     /etc/letsencrypt/live/{{DOMAIN}}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{DOMAIN}}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Validator enforces a 10MB body limit (MAX_REQUEST_BODY_SIZE) — match it.
+    client_max_body_size 10m;
+
+    # The validator only emits HSTS when terminating TLS itself, so the edge
+    # supplies it when proxying plain HTTP.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # nginx proxy_set_header inheritance is all-or-nothing per block, so each
+    # location repeats the full header set deliberately.
+
+    # SSE (POST /api/ask-stream) — must stream unbuffered.
+    location = /api/ask-stream {
+        proxy_pass http://127.0.0.1:{{UPSTREAM_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    # GraphQL-over-WebSocket subscriptions: canonical /graphql/ws plus the
+    # /ws alias the JS SDK derives from its base URL.
+    location ~ ^/(graphql/ws|ws)$ {
+        proxy_pass http://127.0.0.1:{{UPSTREAM_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Operational internals — keep off the public edge (poll them locally on
+    # the SERVER_PORT loopback, or allow-list a monitoring IP instead of 404).
+    location = /metrics { return 404; }
+    location = /config  { return 404; }
+
+    # Everything else: /graphql (POST + playground), /healthz, /readyz,
+    # /health, /dag, /docs, /schema.
+    location / {
+        proxy_pass http://127.0.0.1:{{UPSTREAM_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+}

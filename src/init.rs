@@ -76,11 +76,11 @@ pub async fn run(
     output::info("  4. knishio full   (verify everything is healthy)");
     println!();
     output::info("Files created:");
-    output::info(&format!("  secrets/          — JWT secret + DB credentials"));
-    output::info(&format!("  knishio.toml      — CLI config (points to production compose)"));
-    output::info(&format!("  .env.production   — environment config"));
+    output::info("  secrets/          — JWT secret + DB credentials");
+    output::info("  knishio.toml      — CLI config (points to production compose)");
+    output::info("  .env.production   — environment config");
     if generate_tls {
-        output::info(&format!("  certs/            — self-signed TLS certificates"));
+        output::info("  certs/            — self-signed TLS certificates");
     }
 
     Ok(())
@@ -146,7 +146,7 @@ url = "https://localhost:8080"
 insecure_tls = true   # Set to false once you have real TLS certificates
 
 [docker]
-compose_file = "docker-compose.production.yml"
+profile = "production"   # start/stop/etc use docker-compose.production.yml as the base
 postgres_container = "knishio-postgres"
 validator_container = "knishio-validator"
 

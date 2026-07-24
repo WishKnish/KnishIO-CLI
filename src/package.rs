@@ -12,6 +12,21 @@ use tokio::process::Command;
 
 use crate::{output, paths};
 
+/// Map an arch name to the Makefile's linux packaging target.
+/// `package-linux` is arm64 (native buildx on Apple Silicon);
+/// `package-linux-amd64` runs the builder stage under emulation
+/// (BUILDER_PLATFORM override) with a file(1) arch gate.
+pub fn linux_make_target(arch: &str) -> Result<&'static str> {
+    match arch {
+        "arm64" | "aarch64" => Ok("package-linux"),
+        "amd64" | "x86_64" => Ok("package-linux-amd64"),
+        other => anyhow::bail!(
+            "unknown arch `{}` — expected arm64 or amd64",
+            other
+        ),
+    }
+}
+
 /// Locate the directory that contains the validator's Makefile by
 /// anchoring on `docker-compose.standalone.yml` — the same marker the
 /// `docker` subcommands use for compose-file discovery. Returns the
@@ -72,13 +87,16 @@ pub async fn package_mac(cwd: &Path) -> Result<()> {
     run_make(&dir, "package-mac").await
 }
 
-pub async fn package_linux(cwd: &Path) -> Result<()> {
+pub async fn package_linux(cwd: &Path, arch: &str) -> Result<()> {
     let dir = find_validator_dir(cwd)?;
+    let target = linux_make_target(arch)?;
     output::info(&format!(
-        "Packaging Linux arm64 via {}/Makefile",
-        dir.display()
+        "Packaging Linux {} via {}/Makefile ({})",
+        arch,
+        dir.display(),
+        target
     ));
-    run_make(&dir, "package-linux").await
+    run_make(&dir, target).await
 }
 
 pub async fn package_all(cwd: &Path) -> Result<()> {

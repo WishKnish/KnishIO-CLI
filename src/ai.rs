@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use serde::Deserialize;
-use std::time::Duration;
 
 use crate::config::Config;
 
@@ -322,11 +321,7 @@ fn row_info(label: &str, value: &str) {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn build_client(insecure_tls: bool) -> Result<reqwest::Client> {
-    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(30));
-    if insecure_tls {
-        b = b.danger_accept_invalid_certs(true);
-    }
-    b.build().context("Failed to build HTTP client")
+    crate::http::client(insecure_tls, crate::http::DEFAULT_TIMEOUT)
 }
 
 fn friendly_net_error(e: reqwest::Error) -> anyhow::Error {

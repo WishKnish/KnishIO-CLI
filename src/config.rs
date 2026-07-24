@@ -20,6 +20,29 @@ pub struct Config {
     /// Optional: force this accel, skipping auto-detection. Mostly for CI /
     /// reproducible rigs.  Accepts the same names as the CLI `--accel` flag.
     pub default_accel: Option<String>,
+    /// Remote-deployment defaults for the `deploy` family and `--host`.
+    pub deploy: DeployConfig,
+    /// Provenance of `validator.url` — which layer won precedence. Feeds the
+    /// TARGET banner so operators see WHY a URL is in effect. Not part of the
+    /// file format.
+    #[serde(skip)]
+    pub url_source: crate::target::UrlSource,
+}
+
+/// `[deploy]` — defaults for remote-deployment commands. All optional; flags
+/// override. Replaces the retired `[docker] compose_file` as the home for
+/// deployment-shaped configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DeployConfig {
+    /// Default `--host` (user@host) for ssh-transport commands.
+    pub host: Option<String>,
+    /// Default `--domain` for edge/bootstrap generation.
+    pub domain: Option<String>,
+    /// Default target arch for ship/package ("amd64" | "arm64").
+    pub arch: Option<String>,
+    /// Default remote staging directory for `deploy ship`.
+    pub staging_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,9 +55,16 @@ pub struct ValidatorConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DockerConfig {
-    /// Back-compat single file. Ignored when `accel` is driving file
-    /// selection (i.e. all new code paths).
+    /// DEPRECATED (CLI-1): was never consulted for dispatch — accel profiles
+    /// drive file selection. Kept for deserialization back-compat only; a
+    /// non-default value triggers a warning pointing at `profile`.
     pub compose_file: String,
+    /// Stack profile: "dev" (docker-compose.standalone.yml base — dev JWT
+    /// secret, permissive CORS, rate limiting off) or "production"
+    /// (docker-compose.production.yml base — KNISHIO_ENV=production, _FILE
+    /// secrets, TLS on, rate limiting on). Overridable per-run with the
+    /// global `--profile` flag. Fixes CLI-1: production.yml was unreachable.
+    pub profile: String,
     pub postgres_container: String,
     pub validator_container: String,
     /// Per-accel overlay chains. Keys match `Accel::config_key()`.
@@ -44,6 +74,7 @@ pub struct DockerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AccelProfile {
     /// Compose filenames (in layering order) for `docker compose -f a -f b …`.
     pub files: Vec<String>,
@@ -69,6 +100,8 @@ impl Default for Config {
             docker: DockerConfig::default(),
             database: DatabaseConfig::default(),
             default_accel: None,
+            deploy: DeployConfig::default(),
+            url_source: crate::target::UrlSource::Default,
         }
     }
 }
@@ -86,6 +119,7 @@ impl Default for DockerConfig {
     fn default() -> Self {
         Self {
             compose_file: "docker-compose.standalone.yml".into(),
+            profile: "dev".into(),
             postgres_container: "knishio-postgres".into(),
             validator_container: "knishio-validator".into(),
             accel: default_accel_map(),
@@ -93,14 +127,6 @@ impl Default for DockerConfig {
     }
 }
 
-impl Default for AccelProfile {
-    fn default() -> Self {
-        Self {
-            files: Vec::new(),
-            native_validator: false,
-        }
-    }
-}
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
@@ -168,8 +194,11 @@ impl Config {
     pub fn load(search_start: &Path) -> Self {
         let mut config = match find_config_file(search_start) {
             Some(path) => match Self::from_file(&path) {
-                Ok(cfg) => {
+                Ok(mut cfg) => {
                     output::info(&format!("Config loaded from {}", path.display()));
+                    if cfg.validator.url != crate::target::DEFAULT_URL {
+                        cfg.url_source = crate::target::UrlSource::ConfigFile;
+                    }
                     cfg
                 }
                 Err(e) => {
@@ -199,6 +228,7 @@ impl Config {
     fn apply_env_overrides(&mut self) {
         if let Ok(val) = std::env::var("KNISHIO_URL") {
             self.validator.url = val;
+            self.url_source = crate::target::UrlSource::Env;
         }
         if let Ok(val) = std::env::var("KNISHIO_PG_CONTAINER") {
             self.docker.postgres_container = val;
@@ -221,17 +251,67 @@ impl Config {
         }
     }
 
-    /// Apply CLI flag override for the validator URL.
-    /// Only overrides if the user explicitly passed --url (not the default).
-    pub fn with_url_override(mut self, cli_url: &str) -> Self {
-        // clap always provides a value (default or explicit), so we check
-        // if it differs from the compiled-in default to detect explicit use.
-        // This isn't perfect but covers the common case.
-        let clap_default = "https://localhost:8080";
-        if cli_url != clap_default || self.validator.url == clap_default {
-            self.validator.url = cli_url.to_string();
+    /// Apply an explicit `--url` flag (highest precedence). `None` = flag not
+    /// passed. Replaces the old `with_url_override` compare-against-default
+    /// heuristic, which could neither label the source honestly nor let an
+    /// explicit `--url https://localhost:8080` beat a config-file URL.
+    pub fn apply_url_flag(&mut self, flag: Option<&str>) {
+        if let Some(url) = flag {
+            self.validator.url = url.to_string();
+            self.url_source = crate::target::UrlSource::Flag;
         }
-        self
+    }
+
+    /// Apply an explicit `--profile` flag over `[docker] profile`, validating
+    /// the value. Also warns about the deprecated, never-honored
+    /// `compose_file` field when a config file set it to a non-default.
+    pub fn apply_profile_flag(&mut self, flag: Option<&str>) -> Result<()> {
+        if let Some(p) = flag {
+            self.docker.profile = p.to_string();
+        }
+        match self.docker.profile.as_str() {
+            "dev" | "production" => {}
+            other => anyhow::bail!(
+                "unknown stack profile `{}` — expected \"dev\" or \"production\"",
+                other
+            ),
+        }
+        if self.docker.compose_file != "docker-compose.standalone.yml" {
+            output::warn(
+                "[docker] compose_file is deprecated and was never honored for stack \
+                 selection — use `profile = \"production\"` (or --profile) instead.",
+            );
+        }
+        Ok(())
+    }
+
+    /// Map the accel overlay chain through the active profile: "production"
+    /// swaps the standalone base for docker-compose.production.yml. Overlay
+    /// files (cuda/dmr/…) are unaffected.
+    pub fn profiled_files(&self, files: &[String]) -> Vec<String> {
+        if self.docker.profile != "production" {
+            return files.to_vec();
+        }
+        let mut swapped = false;
+        let out: Vec<String> = files
+            .iter()
+            .map(|f| {
+                if f == "docker-compose.standalone.yml" {
+                    swapped = true;
+                    "docker-compose.production.yml".to_string()
+                } else {
+                    f.clone()
+                }
+            })
+            .collect();
+        if !swapped {
+            output::warn(
+                "profile \"production\" set, but the resolved stack has no \
+                 docker-compose.standalone.yml base to swap (native/metal chains \
+                 run the validator outside compose) — files unchanged.",
+            );
+        }
+        out
     }
 
     /// Look up the overlay file list for the given accel, falling back to CPU

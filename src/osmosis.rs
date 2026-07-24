@@ -7,7 +7,6 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use serde::Deserialize;
-use std::time::Duration;
 
 use crate::config::Config;
 use crate::output;
@@ -116,11 +115,7 @@ pub async fn status(config: &Config) -> Result<()> {
 }
 
 fn http_client(insecure_tls: bool) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
-    if insecure_tls {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    builder.build().context("Failed to build HTTP client")
+    crate::http::client(insecure_tls, crate::http::SHORT_TIMEOUT)
 }
 
 fn unix_now() -> i64 {

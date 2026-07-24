@@ -288,14 +288,7 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
     println!("═══════════════════════════════════════════════════════════════");
     println!();
 
-    let mut client_builder =
-        reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
-    if args.insecure_tls {
-        client_builder = client_builder.danger_accept_invalid_certs(true);
-    }
-    let client = client_builder
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = crate::http::client(args.insecure_tls, crate::http::DEFAULT_TIMEOUT)?;
 
     // Progress bar
     let pb = ProgressBar::new(total_molecules as u64);

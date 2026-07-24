@@ -9,10 +9,9 @@
 //! prefixes. Unknown families land in a catch-all "Other" bucket so new
 //! validator-side metrics show up without CLI changes.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use crate::config::Config;
 
@@ -251,11 +250,7 @@ fn format_value(v: f64) -> String {
 // ── HTTP plumbing (mirrors health.rs TLS-bypass pattern) ────────────
 
 fn build_client(insecure_tls: bool) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
-    if insecure_tls {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    builder.build().context("Failed to build HTTP client")
+    crate::http::client(insecure_tls, crate::http::DEFAULT_TIMEOUT)
 }
 
 fn friendly_net_error(e: reqwest::Error) -> anyhow::Error {

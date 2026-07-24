@@ -1,9 +1,11 @@
 # knishio-cli CI — clippy + test gate + dependency-advisory audit.
 # House Rust style (mirrors the SDK repos): pinned action refs,
 # dtolnay/rust-toolchain@stable, exit-code gates, no floating tags.
-# Cargo.lock is gitignored, so cargo audit runs against fresh resolution
-# (what consumers get) — must stay free of RUSTSEC vulnerabilities
-# (notably libcrux-ml-kem >= 0.0.9 via knishio-client 0.9.2).
+# Cargo.lock is COMMITTED (0.2.0): the test job builds --locked for
+# reproducibility (a fresh resolve broke the first testnet CD — newest
+# pgvector pulled sqlx 0.9 beside our 0.8; F-12). The audit job still
+# resolves FRESH (cargo update) so RUSTSEC coverage tracks what a new
+# consumer would get — notably libcrux-ml-kem >= 0.0.9 via knishio-client.
 name: CI
 
 on: [push, pull_request]
@@ -26,7 +28,7 @@ jobs:
         run: cargo clippy --all-targets
 
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked
 
   audit:
     name: cargo audit (dependency advisories)
@@ -37,10 +39,11 @@ jobs:
       - name: Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      # Cargo.lock is gitignored → resolve fresh (what consumers build), then
-      # audit that graph against the RUSTSEC advisory database.
-      - name: Generate lockfile
-        run: cargo generate-lockfile
+      # Cargo.lock is committed, but the audit should track what a FRESH
+      # resolve pulls (newer transitive deps a consumer would get), so update
+      # to latest-compatible before auditing.
+      - name: Refresh lockfile to latest-compatible
+        run: cargo update
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit

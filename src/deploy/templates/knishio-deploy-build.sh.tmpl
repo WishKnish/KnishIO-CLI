@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Build + safe binary swap, called by the Forge deploy script (which must stay
+# a minimal ASCII template — multi-line content breaks Forge's expansion).
+set -euo pipefail
+{{LOCK_RESTORE_LINE}}
+export PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_TARGET_DIR="$HOME/.cargo-target/knishio-validator"
+cargo build --release --locked
+sudo /usr/local/bin/upgrade.sh "$CARGO_TARGET_DIR/release/knishio-validator"

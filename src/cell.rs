@@ -1,10 +1,7 @@
 //! Cell management via `docker exec psql`.
 
 use anyhow::{Context, Result};
-use std::process::Stdio;
-use tokio::process::Command;
 
-use crate::config::Config;
 use crate::output;
 
 // ── Input Validation ────────────────────────────────────────
@@ -77,48 +74,6 @@ pub(crate) fn validate_bundle(bundle: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod validator_tests {
-    use super::*;
-
-    #[test]
-    fn bundle_must_be_64_chars() {
-        assert!(validate_bundle("").is_err());
-        assert!(validate_bundle("9a24").is_err());
-        assert!(validate_bundle(&"a".repeat(63)).is_err());
-        assert!(validate_bundle(&"a".repeat(65)).is_err());
-        assert!(validate_bundle(&"a".repeat(64)).is_ok());
-    }
-
-    #[test]
-    fn bundle_rejects_uppercase() {
-        // Validator uses string equality; case mismatch silently breaks enforcement.
-        assert!(validate_bundle("9A2411F2AF1A801A1E4262E74A743EB5EF6EF0DCCF3826851F7D861D51FD41D4").is_err());
-    }
-
-    #[test]
-    fn bundle_rejects_non_hex() {
-        let mut s = "a".repeat(63);
-        s.push('z');
-        assert!(validate_bundle(&s).is_err());
-    }
-
-    #[test]
-    fn bundle_accepts_canonical() {
-        assert!(validate_bundle("9a2411f2af1a801a1e4262e74a743eb5ef6ef0dccf3826851f7d861d51fd41d4").is_ok());
-    }
-
-    #[test]
-    fn mode_only_accepts_three_values() {
-        assert!(validate_mode("open").is_ok());
-        assert!(validate_mode("permissioned").is_ok());
-        assert!(validate_mode("private").is_ok());
-        assert!(validate_mode("Open").is_err()); // case-sensitive
-        assert!(validate_mode("public").is_err());
-        assert!(validate_mode("").is_err());
-    }
-}
-
 
 // ── Database Operations ─────────────────────────────────────
 
@@ -128,43 +83,11 @@ mod validator_tests {
 /// `RETURNING` clauses see only the actual rows. Without `-q`, an UPDATE that
 /// matches 0 rows would still emit "UPDATE 0" on stdout, defeating the
 /// "empty output ⇒ no row matched" idiom that C-1 relies on.
-async fn psql(config: &Config, sql: &str) -> Result<String> {
-    let out = Command::new("docker")
-        .args([
-            "exec",
-            &config.docker.postgres_container,
-            "psql",
-            "-U",
-            &config.database.user,
-            "-d",
-            &config.database.name,
-            "-q",
-            "-t",
-            "-A",
-            "-c",
-            sql,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to exec into postgres container — is the stack running?")?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // Scrub error: don't expose raw SQL errors with schema details
-        if stderr.contains("does not exist") {
-            anyhow::bail!("Database operation failed — run `knishio db` to check consistency");
-        } else if stderr.contains("connection refused") || stderr.contains("could not connect") {
-            anyhow::bail!("Cannot connect to database — is the stack running?");
-        } else {
-            anyhow::bail!("Database operation failed (run with RUST_LOG=debug for details)");
-        }
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+async fn psql(t: &crate::psql::PsqlTransport, sql: &str) -> Result<String> {
+    t.exec(sql).await
 }
 
-pub async fn create(config: &Config, slug: &str, name: Option<&str>, status: &str) -> Result<()> {
+pub async fn create(t: &crate::psql::PsqlTransport, slug: &str, name: Option<&str>, status: &str) -> Result<()> {
     validate_slug(slug)?;
     validate_status(status)?;
     let display_name = name.unwrap_or(slug);
@@ -179,14 +102,14 @@ pub async fn create(config: &Config, slug: &str, name: Option<&str>, status: &st
         display_name.replace('\'', "''"),
         status.replace('\'', "''"),
     );
-    psql(config, &sql).await?;
+    psql(t, &sql).await?;
     output::success(&format!("Cell '{}' created (status: {})", slug, status));
     Ok(())
 }
 
-pub async fn list(config: &Config) -> Result<()> {
+pub async fn list(t: &crate::psql::PsqlTransport) -> Result<()> {
     let sql = "SELECT slug, name, status, created_at FROM cells ORDER BY created_at";
-    let result = psql(config, sql).await?;
+    let result = psql(t, sql).await?;
     if result.is_empty() {
         output::info("No cells found");
         return Ok(());
@@ -194,8 +117,8 @@ pub async fn list(config: &Config) -> Result<()> {
 
     output::header("Cells");
     println!(
-        "{:<20} {:<30} {:<12} {}",
-        "SLUG", "NAME", "STATUS", "CREATED"
+        "{:<20} {:<30} {:<12} CREATED",
+        "SLUG", "NAME", "STATUS"
     );
     println!("{}", "-".repeat(80));
     for line in result.lines() {
@@ -213,7 +136,7 @@ pub async fn list(config: &Config) -> Result<()> {
 /// `knishio cell usage [<slug>]` — per-cell resource counters (query/mutation
 /// volume over 24h + token/rule/meta totals; GAP-06-004 counters on the `cells`
 /// table). No quota *limits* exist in the schema — these are usage counters.
-pub async fn usage(config: &Config, slug: Option<String>) -> Result<()> {
+pub async fn usage(t: &crate::psql::PsqlTransport, slug: Option<String>) -> Result<()> {
     let cols = "slug, query_count_24h, mutation_count_24h, token_count, rule_count, meta_count";
     let sql = match &slug {
         Some(s) => {
@@ -227,7 +150,7 @@ pub async fn usage(config: &Config, slug: Option<String>) -> Result<()> {
             "SELECT {cols} FROM cells ORDER BY (query_count_24h + mutation_count_24h) DESC"
         ),
     };
-    let result = psql(config, &sql).await?;
+    let result = psql(t, &sql).await?;
     if result.is_empty() {
         output::info(if slug.is_some() {
             "Cell not found"
@@ -259,7 +182,7 @@ pub async fn usage(config: &Config, slug: Option<String>) -> Result<()> {
 /// SAFETY: Only cells with the BENCH_CLI_ prefix can be purged.
 /// Atoms, bonds, and cascades auto-cascade from molecule deletion.
 /// used_positions intentionally NOT touched (OTS anti-replay is global).
-pub async fn purge(config: &Config, slug: &str) -> Result<()> {
+pub async fn purge(t: &crate::psql::PsqlTransport, slug: &str) -> Result<()> {
     validate_slug(slug)?;
 
     // SAFETY: Refuse to purge non-benchmark cells
@@ -291,19 +214,19 @@ pub async fn purge(config: &Config, slug: &str) -> Result<()> {
          DELETE FROM cells WHERE slug = '{escaped}'; \
          COMMIT;"
     );
-    psql(config, &sql).await?;
+    psql(t, &sql).await?;
     output::success(&format!("Cell '{}' purged and deleted", slug));
     Ok(())
 }
 
 /// List all benchmark cell slugs (BENCH_CLI_*), including archived.
-pub async fn list_bench_slugs(config: &Config) -> Result<Vec<String>> {
+pub async fn list_bench_slugs(t: &crate::psql::PsqlTransport) -> Result<Vec<String>> {
     let sql = "SELECT slug FROM cells WHERE slug LIKE 'BENCH_CLI_%' ORDER BY created_at";
-    let result = psql(config, sql).await?;
+    let result = psql(t, sql).await?;
     Ok(result.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect())
 }
 
-pub async fn set_status(config: &Config, slug: &str, status: &str) -> Result<()> {
+pub async fn set_status(t: &crate::psql::PsqlTransport, slug: &str, status: &str) -> Result<()> {
     validate_slug(slug)?;
     validate_status(status)?;
 
@@ -312,9 +235,9 @@ pub async fn set_status(config: &Config, slug: &str, status: &str) -> Result<()>
         status.replace('\'', "''"),
         slug.replace('\'', "''"),
     );
-    let _result = psql(config, &sql).await?;
+    let _result = psql(t, &sql).await?;
     let check = psql(
-        config,
+        t,
         &format!(
             "SELECT status FROM cells WHERE slug = '{}'",
             slug.replace('\'', "''")
@@ -342,7 +265,7 @@ pub async fn set_status(config: &Config, slug: &str, status: &str) -> Result<()>
 /// whitelist (`open|permissioned|private`) and list keys (`authorized_bundles`
 /// or `admin_bundles`) are constants.
 async fn emit_audit_event(
-    config: &Config,
+    t: &crate::psql::PsqlTransport,
     action: &str,
     slug: &str,
     details: serde_json::Value,
@@ -358,7 +281,7 @@ async fn emit_audit_event(
          VALUES ('config', '{escaped_action}', 'cell', '{escaped_slug}', \
                  '{details_json}'::jsonb, '{escaped_slug}', 'info')"
     );
-    let _ = psql(config, &sql).await;
+    let _ = psql(t, &sql).await;
 }
 
 // ── ABAC Permission Management (WP-017) ─────────────────────
@@ -375,7 +298,7 @@ async fn emit_audit_event(
 // Reject reasons formatted there must match exactly to keep audit captures stable.
 
 /// Show full cell record with parsed access state.
-pub async fn show(config: &Config, slug: &str) -> Result<()> {
+pub async fn show(t: &crate::psql::PsqlTransport, slug: &str) -> Result<()> {
     validate_slug(slug)?;
     let escaped = slug.replace('\'', "''");
 
@@ -392,7 +315,7 @@ pub async fn show(config: &Config, slug: &str) -> Result<()> {
              COALESCE(config->'access'->'admin_bundles', '[]'::jsonb) \
          FROM cells WHERE slug = '{escaped}'"
     );
-    let result = psql(config, &sql).await?;
+    let result = psql(t, &sql).await?;
     if result.is_empty() {
         anyhow::bail!("Cell '{}' not found", slug);
     }
@@ -435,7 +358,7 @@ fn print_jsonb_list(raw: &str, indent: &str) {
 /// Set the cell's ABAC mode. Initializes empty `authorized_bundles` and
 /// `admin_bundles` arrays if missing, so subsequent grant/admin commands
 /// never see a NULL JSONB key.
-pub async fn set_mode(config: &Config, slug: &str, mode: &str) -> Result<()> {
+pub async fn set_mode(t: &crate::psql::PsqlTransport, slug: &str, mode: &str) -> Result<()> {
     validate_slug(slug)?;
     validate_mode(mode)?;
 
@@ -460,11 +383,11 @@ pub async fn set_mode(config: &Config, slug: &str, mode: &str) -> Result<()> {
              ) \
          ) WHERE slug = '{escaped_slug}' RETURNING slug"
     );
-    let returned = psql(config, &sql).await?;
+    let returned = psql(t, &sql).await?;
     if returned.trim().is_empty() {
         anyhow::bail!("Cell '{}' not found", slug);
     }
-    emit_audit_event(config, "cell_set_mode", slug, serde_json::json!({"mode": mode})).await;
+    emit_audit_event(t, "cell_set_mode", slug, serde_json::json!({"mode": mode})).await;
     output::success(&format!("Cell '{}' → mode={}", slug, mode));
 
     // Post-condition warning: tightening to permissioned/private with empty list
@@ -475,7 +398,7 @@ pub async fn set_mode(config: &Config, slug: &str, mode: &str) -> Result<()> {
             "SELECT COALESCE(jsonb_array_length(config->'access'->'{key}'), 0) \
              FROM cells WHERE slug = '{escaped_slug}'"
         );
-        let count = psql(config, &count_sql).await?;
+        let count = psql(t, &count_sql).await?;
         if count.trim() == "0" {
             output::warn(&format!(
                 "{} list is empty — cell will reject all molecules until a bundle is added",
@@ -490,7 +413,7 @@ pub async fn set_mode(config: &Config, slug: &str, mode: &str) -> Result<()> {
 /// GUEST (anonymous) auth-token issuance + guest reads. Decoupled from `mode` — a
 /// `permissioned` cell may still allow anonymous reads. Merges into the existing
 /// `access` object so mode/authorized_bundles/admin_bundles are preserved.
-pub async fn set_allow_guest(config: &Config, slug: &str, allow: bool) -> Result<()> {
+pub async fn set_allow_guest(t: &crate::psql::PsqlTransport, slug: &str, allow: bool) -> Result<()> {
     validate_slug(slug)?;
     let escaped_slug = slug.replace('\'', "''");
     // `||` merges allow_guest into the existing access object (preserving its other
@@ -503,25 +426,25 @@ pub async fn set_allow_guest(config: &Config, slug: &str, allow: bool) -> Result
              COALESCE(config->'access', '{{}}'::jsonb) || jsonb_build_object('allow_guest', {allow}) \
          ) WHERE slug = '{escaped_slug}' RETURNING slug"
     );
-    let returned = psql(config, &sql).await?;
+    let returned = psql(t, &sql).await?;
     if returned.trim().is_empty() {
         anyhow::bail!("Cell '{}' not found", slug);
     }
-    emit_audit_event(config, "cell_set_allow_guest", slug, serde_json::json!({"allow_guest": allow})).await;
+    emit_audit_event(t, "cell_set_allow_guest", slug, serde_json::json!({"allow_guest": allow})).await;
     output::success(&format!("Cell '{}' → allow_guest={}", slug, allow));
     Ok(())
 }
 
 /// Add `bundle` to `config->'access'->'authorized_bundles'` (idempotent).
-pub async fn grant(config: &Config, slug: &str, bundle: &str) -> Result<()> {
-    add_to_access_list(config, slug, "authorized_bundles", bundle).await?;
+pub async fn grant(t: &crate::psql::PsqlTransport, slug: &str, bundle: &str) -> Result<()> {
+    add_to_access_list(t, slug, "authorized_bundles", bundle).await?;
     output::success(&format!("Cell '{}' authorized: {}", slug, bundle));
     Ok(())
 }
 
 /// Remove `bundle` from `config->'access'->'authorized_bundles'`.
-pub async fn revoke(config: &Config, slug: &str, bundle: &str) -> Result<()> {
-    let removed = remove_from_access_list(config, slug, "authorized_bundles", bundle).await?;
+pub async fn revoke(t: &crate::psql::PsqlTransport, slug: &str, bundle: &str) -> Result<()> {
+    let removed = remove_from_access_list(t, slug, "authorized_bundles", bundle).await?;
     if removed {
         output::success(&format!("Cell '{}' revoked: {}", slug, bundle));
     } else {
@@ -531,8 +454,8 @@ pub async fn revoke(config: &Config, slug: &str, bundle: &str) -> Result<()> {
 }
 
 /// Add `bundle` to `config->'access'->'admin_bundles'` (idempotent).
-pub async fn add_admin(config: &Config, slug: &str, bundle: &str) -> Result<()> {
-    add_to_access_list(config, slug, "admin_bundles", bundle).await?;
+pub async fn add_admin(t: &crate::psql::PsqlTransport, slug: &str, bundle: &str) -> Result<()> {
+    add_to_access_list(t, slug, "admin_bundles", bundle).await?;
     output::success(&format!("Cell '{}' admin added: {}", slug, bundle));
     Ok(())
 }
@@ -541,27 +464,27 @@ pub async fn add_admin(config: &Config, slug: &str, bundle: &str) -> Result<()> 
 /// (fail-fast: a malformed bundle on line 47 of a 50-line file aborts the
 /// whole batch instead of half-onboarding the cell).
 pub async fn grant_from_file(
-    config: &Config,
+    t: &crate::psql::PsqlTransport,
     slug: &str,
     path: &std::path::Path,
 ) -> Result<()> {
-    bulk_apply(config, slug, path, "authorized_bundles").await
+    bulk_apply(t, slug, path, "authorized_bundles").await
 }
 
 /// Bulk add admins from a file. Same fail-fast semantics as `grant_from_file`.
 pub async fn add_admin_from_file(
-    config: &Config,
+    t: &crate::psql::PsqlTransport,
     slug: &str,
     path: &std::path::Path,
 ) -> Result<()> {
-    bulk_apply(config, slug, path, "admin_bundles").await
+    bulk_apply(t, slug, path, "admin_bundles").await
 }
 
 /// Shared bulk-import path. Reads the file once, validates every line, then
 /// applies in order. Each grant is idempotent so a partial-then-resumed run
 /// is safe (already-granted bundles are no-ops).
 async fn bulk_apply(
-    config: &Config,
+    t: &crate::psql::PsqlTransport,
     slug: &str,
     path: &std::path::Path,
     key: &str,
@@ -590,15 +513,15 @@ async fn bulk_apply(
     let what = if key == "authorized_bundles" { "bundle(s) authorized" } else { "admin(s) added" };
     output::info(&format!("Importing {} from {}...", bundles.len(), path.display()));
     for bundle in &bundles {
-        add_to_access_list(config, slug, key, bundle).await?;
+        add_to_access_list(t, slug, key, bundle).await?;
     }
     output::success(&format!("Cell '{}': {} {}", slug, bundles.len(), what));
     Ok(())
 }
 
 /// Remove `bundle` from `config->'access'->'admin_bundles'`.
-pub async fn remove_admin(config: &Config, slug: &str, bundle: &str) -> Result<()> {
-    let removed = remove_from_access_list(config, slug, "admin_bundles", bundle).await?;
+pub async fn remove_admin(t: &crate::psql::PsqlTransport, slug: &str, bundle: &str) -> Result<()> {
+    let removed = remove_from_access_list(t, slug, "admin_bundles", bundle).await?;
     if removed {
         output::success(&format!("Cell '{}' admin removed: {}", slug, bundle));
     } else {
@@ -615,7 +538,7 @@ pub async fn remove_admin(config: &Config, slug: &str, bundle: &str) -> Result<(
 /// untouched list) — this is the only safe pattern because PostgreSQL's
 /// `jsonb_set` does not auto-create intermediate path keys.
 async fn add_to_access_list(
-    config: &Config,
+    t: &crate::psql::PsqlTransport,
     slug: &str,
     key: &str,
     bundle: &str,
@@ -652,13 +575,13 @@ async fn add_to_access_list(
              ) \
          ) WHERE slug = '{escaped_slug}' RETURNING slug"
     );
-    let returned = psql(config, &sql).await?;
+    let returned = psql(t, &sql).await?;
     if returned.trim().is_empty() {
         anyhow::bail!("Cell '{}' not found", slug);
     }
     let action = if key == "authorized_bundles" { "cell_grant" } else { "cell_add_admin" };
     emit_audit_event(
-        config,
+        t,
         action,
         slug,
         serde_json::json!({"bundle": bundle, "list": key}),
@@ -669,7 +592,7 @@ async fn add_to_access_list(
 /// Remove `bundle` from the named JSONB string array under `config->'access'`.
 /// Returns `true` if the bundle was present and removed, `false` if absent.
 async fn remove_from_access_list(
-    config: &Config,
+    t: &crate::psql::PsqlTransport,
     slug: &str,
     key: &str,
     bundle: &str,
@@ -715,7 +638,7 @@ async fn remove_from_access_list(
          SELECT (SELECT was_present FROM before)::text || '|' || COALESCE((SELECT slug FROM updated), '') \
          FROM before"
     );
-    let returned = psql(config, &sql).await?;
+    let returned = psql(t, &sql).await?;
     let line = returned.trim();
     // Cell not found: CTE `before` returns no rows, so the outer SELECT also empty.
     if line.is_empty() {
@@ -727,11 +650,53 @@ async fn remove_from_access_list(
     if was_present {
         let action = if key == "authorized_bundles" { "cell_revoke" } else { "cell_remove_admin" };
         emit_audit_event(
-            config,
+            t,
             action,
             slug,
             serde_json::json!({"bundle": bundle, "list": key}),
         ).await;
     }
     Ok(was_present)
+}
+
+#[cfg(test)]
+mod validator_tests {
+    use super::*;
+
+    #[test]
+    fn bundle_must_be_64_chars() {
+        assert!(validate_bundle("").is_err());
+        assert!(validate_bundle("9a24").is_err());
+        assert!(validate_bundle(&"a".repeat(63)).is_err());
+        assert!(validate_bundle(&"a".repeat(65)).is_err());
+        assert!(validate_bundle(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn bundle_rejects_uppercase() {
+        // Validator uses string equality; case mismatch silently breaks enforcement.
+        assert!(validate_bundle("9A2411F2AF1A801A1E4262E74A743EB5EF6EF0DCCF3826851F7D861D51FD41D4").is_err());
+    }
+
+    #[test]
+    fn bundle_rejects_non_hex() {
+        let mut s = "a".repeat(63);
+        s.push('z');
+        assert!(validate_bundle(&s).is_err());
+    }
+
+    #[test]
+    fn bundle_accepts_canonical() {
+        assert!(validate_bundle("9a2411f2af1a801a1e4262e74a743eb5ef6ef0dccf3826851f7d861d51fd41d4").is_ok());
+    }
+
+    #[test]
+    fn mode_only_accepts_three_values() {
+        assert!(validate_mode("open").is_ok());
+        assert!(validate_mode("permissioned").is_ok());
+        assert!(validate_mode("private").is_ok());
+        assert!(validate_mode("Open").is_err()); // case-sensitive
+        assert!(validate_mode("public").is_err());
+        assert!(validate_mode("").is_err());
+    }
 }

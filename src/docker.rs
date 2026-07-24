@@ -78,7 +78,7 @@ pub fn resolve_gen_model(name: &str) -> String {
     }
 }
 
-async fn compose(files: &[PathBuf], args: &[&str], env: &[(&str, &str)]) -> Result<bool> {
+pub(crate) async fn compose(files: &[PathBuf], args: &[&str], env: &[(&str, &str)]) -> Result<bool> {
     if files.is_empty() {
         return Err(anyhow::anyhow!(
             "compose() called with no compose files — this is a bug"
