@@ -125,10 +125,14 @@ pub async fn list(t: &crate::psql::PsqlTransport, filters: ListFilters) -> Resul
         let ts: i64 = cols[0].parse().unwrap_or(0);
         let age = format_age(now.saturating_sub(ts));
         let severity = colorize_severity(cols[1]);
-        let target = if cols[6].is_empty() {
-            cols[7].to_string()
-        } else {
-            format!("{}={}", cols[6], cols[7])
+        // target_type=target_id, but either side can be empty — a bare
+        // `config=` (type with no id, e.g. startup_secrets_audit rows) or a
+        // dangling `=` reads as truncated output rather than "no target".
+        let target = match (cols[6].is_empty(), cols[7].is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => cols[7].to_string(),
+            (false, true) => cols[6].to_string(),
+            (false, false) => format!("{}={}", cols[6], cols[7]),
         };
 
         println!(

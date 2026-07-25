@@ -22,6 +22,21 @@ fn local_shake256(path: &Path) -> Result<String> {
     Ok(hex::encode(out))
 }
 
+/// The remote SHAKE256 command, used by BOTH artifact mode (printed) and
+/// `--execute` (run) so the two can never drift.
+///
+/// `os.path.expanduser` is load-bearing: the default `--dest` is
+/// `~/knishio-staging`, and a bare `~` inside a Python string literal is NOT
+/// expanded (tilde expansion is a shell feature) — `open("~/…")` raises
+/// FileNotFoundError, which used to surface as a bogus "chain-of-custody
+/// FAILED" on an upload that actually succeeded.
+fn remote_hash_cmd(remote_path: &str) -> String {
+    format!(
+        "python3 -c 'import hashlib,os;print(hashlib.shake_256(open(os.path.expanduser(\"{}\"),\"rb\").read()).hexdigest(32))'",
+        remote_path
+    )
+}
+
 /// Locate the newest tarball in the validator repo's dist/ for `arch`.
 fn find_tarball(validator_dir: &Path, arch: &str) -> Result<PathBuf> {
     let dist = validator_dir.join("dist");
@@ -68,10 +83,7 @@ pub async fn ship(
         println!("# knishio deploy ship — commands (re-run with --execute to run them):");
         println!("ssh {} 'mkdir -p {}'", host, dest_dir);
         println!("scp {} {}:{}", tarball.display(), host, remote_path);
-        println!(
-            "ssh {} \"python3 -c 'import hashlib;print(hashlib.shake_256(open(\\\"{}\\\",\\\"rb\\\").read()).hexdigest(32))'\"",
-            host, remote_path
-        );
+        println!("ssh {} \"{}\"", host, remote_hash_cmd(&remote_path).replace('"', "\\\""));
         println!("# expect: {}", local_hash);
         return Ok(());
     }
@@ -88,13 +100,18 @@ pub async fn ship(
     }
     h.scp(&tarball, &remote_path).await?;
 
-    let remote = h
-        .run(&format!(
-            "python3 -c 'import hashlib;print(hashlib.shake_256(open(\"{}\",\"rb\").read()).hexdigest(32))'",
-            remote_path
-        ))
-        .await?;
+    let remote = h.run(&remote_hash_cmd(&remote_path)).await?;
     let remote_hash = String::from_utf8_lossy(&remote.stdout).trim().to_string();
+    // An empty hash means the remote command itself failed (missing python3,
+    // unreadable path) — surface THAT rather than a bogus mismatch report.
+    if remote_hash.is_empty() {
+        anyhow::bail!(
+            "could not compute the remote SHAKE256 on {} — the upload may have \
+             succeeded; verification did not run:\n{}",
+            host,
+            String::from_utf8_lossy(&remote.stderr).trim()
+        );
+    }
     if remote_hash != local_hash {
         anyhow::bail!(
             "chain-of-custody FAILED: local {} != remote {} — re-ship",
@@ -107,4 +124,22 @@ pub async fn ship(
         fname, host, remote_path
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards CLI-4: the default `--dest` is `~/knishio-staging`, and Python's
+    /// `open()` does not expand `~`. Without expanduser, `deploy ship --execute`
+    /// fails verification on its own default path.
+    #[test]
+    fn remote_hash_cmd_expands_tilde() {
+        let cmd = remote_hash_cmd("~/knishio-staging/x.tar.gz");
+        assert!(cmd.contains("os.path.expanduser"), "cmd: {cmd}");
+        assert!(cmd.contains("import hashlib,os"), "os must be imported: {cmd}");
+        assert!(cmd.contains("hexdigest(32)"), "SHAKE256 32-byte XOF: {cmd}");
+        // The path must not be passed bare to open() — that's the bug.
+        assert!(!cmd.contains("open(\"~"), "tilde passed bare to open(): {cmd}");
+    }
 }
