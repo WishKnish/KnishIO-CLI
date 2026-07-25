@@ -638,6 +638,36 @@ enum WatchSubject {
         #[arg(long)]
         bundle: String,
     },
+
+    /// Stream wallet admission + balance changes for one bundle/token pair
+    /// (subscription `WalletStatus`).
+    WalletStatus {
+        /// Bundle hash to follow.
+        #[arg(long)]
+        bundle: String,
+
+        /// Token slug to follow (e.g. `USER`).
+        #[arg(long)]
+        token: String,
+    },
+
+    /// Stream active-session changes for a meta pair (subscription `ActiveUser`).
+    ActiveUser {
+        /// MetaType to follow.
+        #[arg(long)]
+        meta_type: String,
+
+        /// MetaId to follow.
+        #[arg(long)]
+        meta_id: String,
+    },
+
+    /// Stream wallet changes for one bundle (subscription `ActiveWallet`).
+    ActiveWallet {
+        /// Bundle hash to follow.
+        #[arg(long)]
+        bundle: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1720,6 +1750,15 @@ async fn main() -> Result<()> {
             }
             WatchSubject::Molecules { bundle } => {
                 watch::molecules(&cfg, bundle).await?;
+            }
+            WatchSubject::WalletStatus { bundle, token } => {
+                watch::wallet_status(&cfg, bundle, token).await?;
+            }
+            WatchSubject::ActiveUser { meta_type, meta_id } => {
+                watch::active_user(&cfg, meta_type, meta_id).await?;
+            }
+            WatchSubject::ActiveWallet { bundle } => {
+                watch::active_wallet(&cfg, bundle).await?;
             }
         },
         Commands::Package { target, clean, arch } => {

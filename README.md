@@ -1192,6 +1192,34 @@ knishio watch molecules --bundle <HEX>
 
 Same `graphql-transport-ws` / WSS transport as `watch dag` and `watch embeddings`.
 
+### watch wallet-status / active-user / active-wallet
+
+The remaining three validator subscriptions. Each is filtered server-side, so it
+only emits when a matching change occurs (and delivery is cell-gated, SEC-010).
+
+```bash
+knishio watch wallet-status --bundle <HEX> --token USER   # admission + balance changes
+knishio watch active-user --meta-type <TYPE> --meta-id <ID>   # active-session changes
+knishio watch active-wallet --bundle <HEX>                  # wallet changes for a bundle
+```
+
+| Subject | Required flags | Subscription |
+|---------|----------------|--------------|
+| `wallet-status` | `--bundle`, `--token` | `WalletStatus` |
+| `active-user` | `--meta-type`, `--meta-id` | `ActiveUser` |
+| `active-wallet` | `--bundle` | `ActiveWallet` |
+
+`active-wallet` selects wallet scalars plus a shallow `token` / `walletBundle`
+nesting; `metas` / `tokenUnits` / `tradeRates` are deliberately omitted so each
+streamed line stays jq-friendly.
+
+**Wire-name safety.** Every subscription's selection set is validated against the
+validator's GraphQL SDL by `cargo test` (`schema_contract`), and `knishio verify`
+opens a real subscription rather than just a handshake — so a query the server
+would reject can't pass either gate. A field named wrongly (e.g. `bundle` where
+the wire name is `bundleHash`) makes the server reject the whole document and the
+subscription silently yields nothing; both nets now catch that.
+
 ## Subsystem Status
 
 Diagnostic surfaces that report the live state of the validator's optional background subsystems. All read-only; safe to call from any operator workflow. The corresponding HTTP endpoints (`/p2p/status`, `/osmosis/status`, `/ai/status`) skip rate-limiting + auth, matching the existing `/readyz` posture — firewall the validator's port externally if you don't want these surfaces exposed beyond the operator network.

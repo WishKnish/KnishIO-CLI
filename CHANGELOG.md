@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.2.3
+
+Closes the CLI-5 bug class with two independent nets, and completes `watch`
+coverage of the validator's subscriptions.
+
+- **Schema-contract tests (build-time net).** Every subscription query is now
+  validated against the validator's GraphQL SDL — recursing into nested
+  selections — so a wire-name mismatch fails `cargo test` instead of shipping.
+  This is the check that CLI-5 needed: the SDL *is* the wire contract, so
+  `#[graphql(name = …)]` renames are handled by construction. The SDL is vendored
+  at `tests/validator-schema.graphql` so the test also runs in CI (which checks
+  out only this repo), plus a monorepo-only test that fails if the vendored copy
+  drifts from the validator's committed baseline. All three were verified to FAIL
+  on purpose (reintroduced CLI-5, drifted the SDL, unregistered a subscription).
+- **`verify` now opens a real subscription (runtime net).** The `ws-graphql` /
+  `ws-alias` checks previously stopped at the `connection_init`→`ack` handshake,
+  which reports a green socket even when the server rejects the query document —
+  exactly how CLI-5 passed verification while being completely broken. They now
+  subscribe: a rejection is a Fail, while silence in the window is a Pass (an
+  idle DAG legitimately emits nothing). Confirmed live: with CLI-5 reintroduced,
+  `verify` fails with the server's own rejection message.
+- **`watch` covers all six validator subscriptions** — added `wallet-status`
+  (`--bundle --token`), `active-user` (`--meta-type --meta-id`) and
+  `active-wallet` (`--bundle`). Previously only `embeddings`, `dag` and
+  `molecules` were watchable, while the docstring wrongly claimed those were "the
+  validator's only subscriptions". A new test asserts the registry covers every
+  subscription the SDL exposes, so a newly added server subscription surfaces
+  instead of going unnoticed.
+- **Internal:** subscription queries now live in one `SUBSCRIPTIONS` registry
+  (single source of truth for dispatch and the contract tests, so a new
+  subscription is covered automatically), and graphql-transport-ws message
+  classification is single-sourced in `src/ws.rs` — shared by `watch`'s streaming
+  loop and `verify`'s probe rather than written twice.
+
 ## 0.2.2
 
 Bug-fix release. Both HIGH items were found by exercising the CLI against a

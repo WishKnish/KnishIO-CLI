@@ -343,19 +343,43 @@ pub async fn run(
     })
     .await);
 
-    // 5+6. WebSocket handshake on the canonical route AND the JS-SDK-derived
-    //      /ws alias (main.rs routes both; nginx must proxy both).
+    // 5+6. WebSocket on the canonical route AND the JS-SDK-derived /ws alias
+    //      (main.rs routes both; nginx must proxy both).
+    //
+    //      This opens a REAL subscription rather than stopping at the handshake.
+    //      A handshake-only check reports a green `connection_ack` even when the
+    //      server rejects the query document — which is exactly how CLI-5 (a
+    //      wire-name mismatch that made `watch dag` yield nothing) passed
+    //      verification while being completely broken. Silence inside the window
+    //      is a Pass (an idle DAG emits nothing); a rejection is a Fail.
     for (name, path) in [("ws-graphql", "/graphql/ws"), ("ws-alias", "/ws")] {
         checks.push(
             timed(name, || async {
                 let url = crate::ws::to_ws_url(&base, path);
-                match crate::ws::connect_and_ack(&url, insecure).await {
-                    Ok(mut ws) => {
-                        let _ = ws.close(None).await;
-                        Ok((CheckStatus::Pass, "connection_ack".to_string()))
+                // dagChanges is the only subscription with no required args.
+                let probe = crate::ws::subscribe_and_probe(
+                    &url,
+                    insecure,
+                    crate::watch::DAG_QUERY,
+                    json!({ "cellSlug": null }),
+                    "dagChanges",
+                    Duration::from_secs(3),
+                )
+                .await;
+                Ok(match probe {
+                    Ok(crate::ws::Probe::Event) => {
+                        (CheckStatus::Pass, "subscribed; streamed a live event".into())
                     }
-                    Err(e) => Ok((CheckStatus::Fail, format!("{:#}", e))),
-                }
+                    Ok(crate::ws::Probe::Subscribed) => (
+                        CheckStatus::Pass,
+                        "subscribed to dagChanges (idle — no events in window)".into(),
+                    ),
+                    Ok(crate::ws::Probe::Rejected(r)) => (
+                        CheckStatus::Fail,
+                        format!("subscription rejected: {}", truncate(&r, 90)),
+                    ),
+                    Err(e) => (CheckStatus::Fail, format!("{:#}", e)),
+                })
             })
             .await,
         );

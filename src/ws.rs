@@ -149,3 +149,125 @@ pub async fn connect_and_ack(ws_url: &str, insecure_tls: bool) -> Result<WsStrea
     }
     Ok(ws)
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  Server-message classification + one-shot subscription probe
+// ═══════════════════════════════════════════════════════════════
+
+/// A classified `graphql-transport-ws` server message.
+///
+/// ONE classifier, two consumers — `watch`'s streaming loop and `verify`'s
+/// probe. Keeping it single-sourced is deliberate: two hand-written copies of
+/// the same protocol logic is exactly how CLI-4 drifted.
+pub enum ServerMsg {
+    /// A subscription payload for the expected root field.
+    Event(serde_json::Value),
+    /// The server refused the subscription — GraphQL validation errors (delivered
+    /// as `next` with `payload.errors`, then `complete`) or an `error` frame.
+    /// This is the CLI-5 signature: no event will ever arrive.
+    Rejected(String),
+    /// The server ended the subscription (`complete`, or a close frame).
+    Completed,
+    /// Protocol noise — keepalives, binary frames, unknown types.
+    Noise,
+}
+
+/// Classify one incoming frame. `root_field` selects the payload to extract.
+pub fn classify(msg: &Message, root_field: &str) -> Result<ServerMsg> {
+    let v: serde_json::Value = match msg {
+        Message::Text(t) => serde_json::from_str(t).context("json parse")?,
+        Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
+            return Ok(ServerMsg::Noise)
+        }
+        Message::Close(_) => return Ok(ServerMsg::Completed),
+    };
+
+    Ok(match v.get("type").and_then(|t| t.as_str()) {
+        Some("next") => {
+            if let Some(event) = v.pointer("/payload/data").and_then(|d| d.get(root_field)) {
+                ServerMsg::Event(event.clone())
+            } else if let Some(errors) = v.pointer("/payload/errors") {
+                ServerMsg::Rejected(errors.to_string())
+            } else {
+                ServerMsg::Noise
+            }
+        }
+        Some("error") => ServerMsg::Rejected(
+            v.get("payload").map(|p| p.to_string()).unwrap_or_default(),
+        ),
+        Some("complete") => ServerMsg::Completed,
+        // "ping"/"connection_ack"/unknown
+        _ => ServerMsg::Noise,
+    })
+}
+
+/// Outcome of a one-shot subscription probe.
+pub enum Probe {
+    /// An event actually arrived.
+    Event,
+    /// Subscribed cleanly; nothing emitted inside the window (a healthy idle feed).
+    Subscribed,
+    /// The server refused the document — the subscription is dead (CLI-5 class).
+    Rejected(String),
+}
+
+/// Open a subscription, then classify what the server does with it.
+///
+/// This is `verify`'s runtime net for the CLI-5 bug class: a handshake-only check
+/// (`connection_init` → `ack`) reports a green socket even when the server
+/// rejects the query document, so the subscription silently yields nothing.
+/// Distinguishing "rejected" from "subscribed but idle" requires actually
+/// subscribing — an idle DAG legitimately emits nothing, so silence is a PASS
+/// while errors / an immediate `complete` are a FAIL.
+pub async fn subscribe_and_probe(
+    ws_url: &str,
+    insecure_tls: bool,
+    query: &str,
+    variables: serde_json::Value,
+    root_field: &str,
+    window: std::time::Duration,
+) -> Result<Probe> {
+    use futures_util::SinkExt;
+
+    let mut ws = connect_and_ack(ws_url, insecure_tls).await?;
+    ws.send(Message::Text(
+        serde_json::to_string(&serde_json::json!({
+            "id": "probe-1",
+            "type": "subscribe",
+            "payload": { "query": query, "variables": variables },
+        }))
+        .expect("static json"),
+    ))
+    .await
+    .context("failed to send subscribe")?;
+
+    let deadline = tokio::time::Instant::now() + window;
+    let outcome = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break Probe::Subscribed;
+        }
+        match tokio::time::timeout(remaining, ws.next()).await {
+            // Window elapsed with no decisive message: subscribed and idle.
+            Err(_) => break Probe::Subscribed,
+            Ok(None) => {
+                break Probe::Rejected("server closed the connection before any event".into())
+            }
+            Ok(Some(Err(e))) => break Probe::Rejected(format!("ws error: {e}")),
+            Ok(Some(Ok(m))) => match classify(&m, root_field)? {
+                ServerMsg::Event(_) => break Probe::Event,
+                ServerMsg::Rejected(r) => break Probe::Rejected(r),
+                ServerMsg::Completed => {
+                    break Probe::Rejected(
+                        "server completed the subscription immediately without sending any event"
+                            .into(),
+                    )
+                }
+                ServerMsg::Noise => continue,
+            },
+        }
+    };
+
+    let _ = ws.close(None).await;
+    Ok(outcome)
+}

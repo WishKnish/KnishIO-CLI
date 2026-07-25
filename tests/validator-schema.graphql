@@ -1,0 +1,2156 @@
+"""
+Response type for ActiveSession mutation
+Matches SDK expected response: bundleHash, metaType, metaId, jsonData, createdAt, updatedAt
+"""
+type ActiveSessionResponse {
+	bundleHash: String!
+	metaType: String!
+	metaId: String!
+	jsonData: String
+	createdAt: Int
+	updatedAt: Int
+}
+
+"""
+Active user type for ActiveUser query
+Represents a currently active user session
+"""
+type ActiveUser {
+	bundleHash: String!
+	metaType: String
+	metaId: String
+	cellSlug: String
+	fingerprint: String
+	ipAddress: String
+	userAgent: String
+	jsonData: String
+	lastActive: Int
+	createdAt: Int
+	"""
+	Last-write timestamp the SDK selects as `updatedAt`. active_sessions has
+	no separate column; this mirrors `last_active` (each write bumps it).
+	"""
+	updatedAt: Int
+}
+
+"""
+QA-008: structured API version + the schema's currently-deprecated fields,
+for SDK compatibility tracking. The `deprecations` list mirrors the
+`#[graphql(deprecation = …)]` directives in the SDL; the `schema_snapshot`
+test guards the SDL against unintended drift.
+"""
+type ApiVersion {
+	"""
+	Server/crate version (semver).
+	"""
+	version: String!
+	"""
+	Currently-deprecated schema fields.
+	"""
+	deprecations: [DeprecatedField!]!
+}
+
+"""
+Atom: Atomic operation within a molecule
+
+An atom represents a single, indivisible operation in the ledger.
+Atoms are the smallest unit of transaction processing.
+"""
+type Atom {
+	"""
+	Unique identifier
+	"""
+	id: ID!
+	"""
+	Molecular hash (parent molecule)
+	"""
+	molecularHash: String!
+	"""
+	Position in bundle sequence
+	"""
+	position: String!
+	"""
+	Wallet address (target of this operation)
+	"""
+	walletAddress: String!
+	"""
+	Isotope type (V=value, C=create, M=metadata, I=identity, U=auth)
+	"""
+	isotope: String!
+	"""
+	Token slug
+	"""
+	token: String!
+	"""
+	Value (amount or data depending on isotope)
+	"""
+	value: String
+	"""
+	Metadata type
+	"""
+	metaType: String
+	"""
+	Metadata ID
+	"""
+	metaId: String
+	"""
+	NFT batch ID
+	"""
+	batchId: String
+	"""
+	Index within molecule (nullable for legacy atoms)
+	"""
+	index: Int
+	"""
+	One-time signature fragment
+	"""
+	otsFragment: String
+	"""
+	Public key
+	"""
+	pubkey: String
+	"""
+	Atom metadata as JSON string (for SDK compatibility with PHP's metasJson field)
+	"""
+	metasJson: String
+	"""
+	Creation timestamp
+	"""
+	createdAt: DateTime!
+	"""
+	Token slug alias for PHP schema compatibility
+	PHP server exposes `tokenSlug` while Rust uses `token`
+	"""
+	tokenSlug: String!
+	"""
+	F-2 (E2E gauntlet 2026-06-02): structured per-atom metadata matching the JS
+	SDK's `Molecule { atoms { metas { … } } }` selection (the SDK selects a nested
+	`metas` object; previously only `metasJson` — a raw JSON string — was exposed,
+	so the query errored "Unknown field metas on type Atom").
+	
+	Built **in-memory** from `metas_json` (the atom's `meta` JSONB = a
+	`[{ "key", "value" }]` array, i.e. `Vec<crate::models::atom::MetaItem>`) plus
+	the atom's own fields — no DB query / no N+1 (mirrors the CreateMolecule
+	subscription's build-from-in-memory approach, WP-016). Reuses
+	`CreateMoleculeMeta` (the exact 7-field shape the SDK selects).
+	"""
+	metas: [CreateMoleculeMeta!]!
+}
+
+"""
+GraphQL input type for atoms
+"""
+input AtomInput {
+	"""
+	Position can be null for recipient atoms in V-isotope transfers
+	(PHP server: `position: String` — nullable). #[graphql(default)] coerces null→""
+	"""
+	position: String! = ""
+	"""
+	Wallet address can be null for recipient atoms
+	(PHP server: `walletAddress: String` — nullable). #[graphql(default)] coerces null→""
+	"""
+	walletAddress: String! = ""
+	isotope: String!
+	"""
+	Token can be null in some SDK-generated atoms
+	(PHP server: `token: String` — nullable). #[graphql(default)] coerces null→""
+	"""
+	token: String! = ""
+	value: String
+	metaType: String
+	metaId: String
+	"""
+	Metadata items - accepts both "meta" and "metas" from SDK
+	"""
+	meta: [MetaItemInput!]! = []
+	"""
+	Alternative metadata field name for SDK compatibility
+	"""
+	metas: [MetaItemInput!]! = []
+	batchId: String
+	createdAt: String
+	index: Int
+	otsFragment: String
+	"""
+	Version identifier for versioned hashing (GAP-03-005)
+	"""
+	version: String
+}
+
+"""
+Atom instance returned by the Atom query
+"""
+type AtomInstance {
+	position: String!
+	walletAddress: String!
+	tokenSlug: String!
+	isotope: String!
+	index: Int
+	molecularHash: String!
+	metaId: String
+	metaType: String
+	metasJson: String
+	batchId: String
+	value: String
+	bundleHashes: [String!]
+	cellSlugs: [String!]
+	createdAt: String
+	otsFragment: String
+}
+
+"""
+Pagination info for atom queries
+"""
+type AtomPaginatorInfo {
+	currentPage: Int!
+	total: Int!
+}
+
+"""
+Atom query response with instances and pagination
+"""
+type AtomResponse {
+	instances: [AtomInstance!]!
+	paginatorInfo: AtomPaginatorInfo!
+}
+
+"""
+Atom info for DAG visualization (shown inside molecule nodes and atom tooltips).
+"""
+type AtomSummaryItem {
+	isotope: String!
+	token: String!
+	value: String
+	index: Int
+	metaType: String
+	metaId: String
+	metas: [MetaSummaryItem!]
+	walletAddress: String
+	position: String
+	batchId: String
+	createdAt: String
+}
+
+"""
+GraphQL response type for authentication tokens
+"""
+type AuthToken {
+	"""
+	JWT token string
+	"""
+	token: String!
+	"""
+	Public key associated with this token
+	"""
+	pubkey: String!
+	"""
+	Token expiration timestamp (Unix timestamp in seconds)
+	"""
+	expiresAt: Int!
+	"""
+	Token expiration (legacy duplicate of `expiresAt`).
+	"""
+	time: Int! @deprecated(reason: "Use expiresAt instead (duplicate for SDK compatibility)")
+	"""
+	Encryption flag
+	"""
+	encrypt: Boolean!
+	"""
+	Public key (legacy duplicate of `pubkey`).
+	"""
+	key: String! @deprecated(reason: "Use pubkey instead (duplicate for SDK compatibility)")
+}
+
+"""
+Balance: Aggregated balance for a token across all positions
+
+Represents the total balance for a specific token in a user's bundle.
+"""
+type Balance {
+	"""
+	Token slug
+	"""
+	tokenSlug: String!
+	"""
+	Total balance across all wallet positions
+	"""
+	balance: String!
+	"""
+	Number of wallets with this token
+	"""
+	walletCount: Int!
+}
+
+"""
+Batch instance returned by Batch and BatchHistory queries
+Matches PHP server BatchInstance type
+"""
+type BatchInstance {
+	"""
+	Batch ID
+	"""
+	batchId: String
+	"""
+	Associated molecular hash
+	"""
+	molecularHash: String
+	"""
+	Batch type (e.g., "transfer", "create")
+	"""
+	type: String
+	"""
+	Batch status
+	"""
+	status: String
+	"""
+	Creation timestamp
+	"""
+	createdAt: String
+	"""
+	Primary wallet
+	"""
+	wallet: Wallet
+	"""
+	Source wallet for transfers
+	"""
+	fromWallet: Wallet
+	"""
+	Destination wallet for transfers
+	"""
+	toWallet: Wallet
+	"""
+	Child batches (recursive structure)
+	"""
+	children: [BatchInstance!]
+	"""
+	Source token units
+	"""
+	sourceTokenUnits: [TokenUnit!]
+	"""
+	Transfer token units
+	"""
+	transferTokenUnits: [TokenUnit!]
+	"""
+	Metadata
+	"""
+	metas: [MetaKeyValue!]
+	"""
+	Through-metadata (intermediate metadata)
+	"""
+	throughMetas: [MetaKeyValue!]
+}
+
+"""
+Bond info for DAG visualization (shown as colored edges with tooltips).
+"""
+type BondInfo {
+	"""
+	Parent molecule hash
+	"""
+	parentHash: String!
+	"""
+	Bonding rule classification: V_TOKEN, M_TIER1, C_CHAIN, ORIGIN, etc.
+	"""
+	bondType: String
+}
+
+"""
+Cell: Multi-tenant sub-ledger
+
+Cells provide isolation for different applications or use cases.
+Each cell can have its own configuration, rules, and token ecosystem.
+GAP-06-003: Lifecycle status controls molecule acceptance.
+"""
+type Cell {
+	"""
+	Unique identifier
+	"""
+	id: ID!
+	"""
+	URL-friendly slug (unique)
+	"""
+	slug: String!
+	"""
+	Human-readable name
+	"""
+	name: String!
+	"""
+	Title field - alias for name for SDK compatibility
+	"""
+	title: String!
+	"""
+	Description of the cell's purpose
+	"""
+	description: String
+	"""
+	Lifecycle status: active, paused, or archived
+	"""
+	status: String!
+	"""
+	Per-cell configuration (consensus threshold, hashing, etc.)
+	"""
+	config: JSON!
+	"""
+	Rolling 24-hour query count (GAP-06-004)
+	"""
+	queryCount24H: Int!
+	"""
+	Rolling 24-hour mutation count (GAP-06-004)
+	"""
+	mutationCount24H: Int!
+	"""
+	Cumulative token count (GAP-06-004)
+	"""
+	tokenCount: Int!
+	"""
+	Cumulative rule count (GAP-06-004)
+	"""
+	ruleCount: Int!
+	"""
+	Cumulative metadata entry count (GAP-06-004)
+	"""
+	metaCount: Int!
+	"""
+	Creation timestamp
+	"""
+	createdAt: DateTime!
+	"""
+	Last update timestamp
+	"""
+	updatedAt: DateTime!
+	"""
+	SDK compatibility alias: `cellSlug` returns the same value as `slug`
+	"""
+	cellSlug: String!
+}
+
+"""
+Comparison operator for metadata filters
+"""
+enum ComparisonOperator {
+	"""
+	Equal to
+	"""
+	EQ
+	"""
+	Not equal to
+	"""
+	NEQ
+	"""
+	Greater than
+	"""
+	GT
+	"""
+	Greater than or equal to
+	"""
+	GTE
+	"""
+	Less than
+	"""
+	LT
+	"""
+	Less than or equal to
+	"""
+	LTE
+	"""
+	SQL LIKE pattern match
+	"""
+	LIKE
+	"""
+	Value in list
+	"""
+	IN
+}
+
+"""
+GraphQL type for the `CreateMolecule` subscription (WP-016).
+
+Shape matches the JS/TS/Rust SDK `onCreateMolecule($bundle)` selection set
+EXACTLY (GraphQL rejects unknown fields, so the client document is the
+contract). `rename_fields = "camelCase"` maps snake_case → the SDK's
+camelCase field names (molecularHash, cellSlug, bundleHash, reasonPayload, …).
+"""
+type CreateMolecule {
+	molecularHash: String!
+	cellSlug: String
+	counterparty: String
+	bundleHash: String
+	status: String!
+	local: Boolean
+	height: Int
+	depth: Int
+	createdAt: String
+	receivedAt: String
+	processedAt: String
+	broadcastedAt: String
+	reason: String
+	reasonPayload: String
+	payload: String
+	atoms: [CreateMoleculeAtom!]!
+}
+
+"""
+A single atom for a `CreateMolecule` subscription event (matches the JS SDK's
+`atoms { ... }` selection exactly). Self-contained SimpleObject — every field
+comes from the in-memory accepted molecule (no DB-loading resolver), so the
+subscription path makes zero extra queries (WP-016).
+"""
+type CreateMoleculeAtom {
+	molecularHash: String!
+	position: String!
+	isotope: String!
+	walletAddress: String!
+	tokenSlug: String!
+	batchId: String
+	value: String
+	index: Int
+	metaType: String
+	metaId: String
+	metasJson: String
+	otsFragment: String
+	createdAt: String
+	metas: [CreateMoleculeMeta!]!
+}
+
+"""
+A metadata key/value for a `CreateMolecule` subscription atom (matches the JS
+SDK's `atoms { metas { ... } }` selection). Self-contained — built from the
+in-memory accepted molecule, no DB load (WP-016).
+"""
+type CreateMoleculeMeta {
+	molecularHash: String
+	position: String
+	metaType: String
+	metaId: String
+	key: String!
+	value: String
+	createdAt: String
+}
+
+"""
+Result of the `askDag` RAG query — a generated answer with source records.
+"""
+type DagAnswer {
+	"""
+	Natural language answer synthesized from DAG data
+	"""
+	answer: String!
+	"""
+	Source records used to generate the answer
+	"""
+	sources: [MetaSemanticResult!]!
+}
+
+type DagChange {
+	"""
+	Event type: "MOLECULE_ACCEPTED" or "BOND_CREATED"
+	"""
+	eventType: String!
+	"""
+	The molecule hash (child molecule for bond events)
+	"""
+	molecularHash: String!
+	"""
+	Molecule status (only for MOLECULE_ACCEPTED events)
+	"""
+	status: String
+	"""
+	DAG height of the molecule
+	"""
+	height: Int
+	"""
+	Cumulative weight at time of acceptance
+	"""
+	cumulativeWeight: Int
+	"""
+	Cumulative confidence (0-100)
+	"""
+	cumulativeConfidence: Float
+	"""
+	Parent molecule hashes (only for MOLECULE_ACCEPTED events)
+	"""
+	parentHashes: [String!]
+	"""
+	Cell slug the molecule belongs to
+	"""
+	cellSlug: String
+	"""
+	Parent molecule hash for bond events (only for BOND_CREATED)
+	"""
+	bondHash: String
+	"""
+	Unix timestamp of the event
+	"""
+	createdAt: Int!
+	"""
+	Bundle hash of the identity that submitted the molecule
+	"""
+	bundleHash: String
+	"""
+	Compact atom summary for DAG visualization
+	"""
+	atomSummary: [AtomSummaryItem!]
+	"""
+	Bonding rule classification (only for BOND_CREATED): V_TOKEN, M_TIER1, etc.
+	"""
+	bondType: String
+}
+
+type DagNode {
+	molecularHash: String!
+	status: String!
+	height: Int!
+	cumulativeWeight: Int!
+	cumulativeConfidence: Float!
+	parentHashes: [String!]!
+	cellSlug: String
+	createdAt: Int!
+	bundleHash: String
+	atomSummary: [AtomSummaryItem!]!
+	"""
+	Bond info for each parent edge (patent §6.3 bonding rule classification)
+	"""
+	bonds: [BondInfo!]!
+	"""
+	Embedding coverage for this molecule's metadata (DataBraid VKG)
+	"""
+	embeddingStatus: EmbeddingStatus
+}
+
+type DagWindowResponse {
+	nodes: [DagNode!]!
+	maxHeight: Int!
+	totalCount: Int!
+}
+
+scalar DateTime
+
+"""
+QA-008: a deprecated schema field + the reason / replacement.
+"""
+type DeprecatedField {
+	"""
+	Fully-qualified field, e.g. `AuthToken.time`.
+	"""
+	field: String!
+	"""
+	Why it's deprecated / what to use instead.
+	"""
+	reason: String!
+}
+
+type EmbeddingChange {
+	"""
+	Metadata type of the embedded row
+	"""
+	metaType: String!
+	"""
+	Instance identifier
+	"""
+	metaId: String!
+	"""
+	Which meta key was just embedded
+	"""
+	key: String!
+	"""
+	Outcome: "COMPLETE" (future: "FAILED")
+	"""
+	state: String!
+	"""
+	Embedding model used
+	"""
+	model: String!
+	"""
+	Unix epoch timestamp of the embedding
+	"""
+	embeddedAt: Int!
+	"""
+	Molecular hash of the molecule that wrote this meta
+	"""
+	molecularHash: String
+}
+
+"""
+Per-instance embedding state for DataBraid observability.
+
+Derived from existing `metas` columns at query time — no extra DB columns needed.
+Apps use this to render spinner badges (PENDING), green badges (COMPLETE),
+or refresh indicators (STALE) on meta assets.
+"""
+enum EmbeddingState {
+	"""
+	No embeddings yet (embedding IS NULL on all rows)
+	"""
+	PENDING
+	"""
+	Embeddings exist but model differs from current config (needs re-embedding)
+	"""
+	STALE
+	"""
+	All rows have current-model embeddings
+	"""
+	COMPLETE
+}
+
+"""
+Embedding status for DAG visualization (shown as badge on nodes + panel section).
+"""
+type EmbeddingStatus {
+	"""
+	Total meta rows belonging to this molecule
+	"""
+	totalMetas: Int!
+	"""
+	Number of metas that have vector embeddings
+	"""
+	embeddedCount: Int!
+	"""
+	Embedding model name (if any metas are embedded)
+	"""
+	model: String
+	"""
+	Most recent embedding timestamp (unix epoch)
+	"""
+	embeddedAt: Int
+}
+
+"""
+Input type for bulk embedding status queries.
+
+Each item identifies one meta instance to check.
+```graphql
+embeddingStatus(instances: [
+{ metaType: "product", metaId: "SKU-001" },
+{ metaType: "product", metaId: "SKU-002" }
+]) { ... }
+```
+"""
+input EmbeddingStatusInput {
+	"""
+	Metadata type
+	"""
+	metaType: String!
+	"""
+	Instance identifier
+	"""
+	metaId: String!
+}
+
+"""
+Bulk embedding status result — echoes back the input keys with their status.
+
+Returned by the `embeddingStatus` query when called with an `instances` array.
+"""
+type EmbeddingStatusItem {
+	"""
+	Metadata type (echoed from input)
+	"""
+	metaType: String!
+	"""
+	Instance identifier (echoed from input)
+	"""
+	metaId: String!
+	"""
+	Overall state for this instance
+	"""
+	state: EmbeddingState!
+	"""
+	Total meta rows for this instance
+	"""
+	totalMetas: Int!
+	"""
+	Rows with a current-model embedding
+	"""
+	embeddedCount: Int!
+	"""
+	Most recent embedding timestamp (unix epoch)
+	"""
+	embeddedAt: Int
+	"""
+	Model name used for completed embeddings
+	"""
+	model: String
+}
+
+"""
+Instance count by key (SDK compatibility)
+"""
+type InstanceCount {
+	key: String!
+	value: Int!
+}
+
+"""
+A scalar that can represent any JSON value.
+"""
+scalar JSON
+
+"""
+Response type for LinkIdentifier mutation
+Matches SDK expected response: type, bundle, content, set, message
+"""
+type LinkIdentifierResponse {
+	type: String!
+	bundle: String!
+	content: String!
+	set: Boolean!
+	message: String
+}
+
+"""
+Meta: Key-value metadata storage
+
+Metadata can be attached to any entity in the system using meta_type and meta_id.
+Supports versioning - multiple values for the same key are stored with timestamps.
+"""
+type Meta {
+	"""
+	Unique identifier
+	"""
+	id: ID!
+	"""
+	Type of metadata (e.g., 'profile', 'settings', 'custom')
+	"""
+	metaType: String!
+	"""
+	Identifier within the type (e.g., user ID, entity ID)
+	"""
+	metaId: String!
+	"""
+	Metadata key
+	"""
+	key: String!
+	"""
+	Metadata value
+	"""
+	value: String!
+	"""
+	Associated molecular hash (optional)
+	"""
+	molecularHash: String
+	"""
+	Creation timestamp
+	"""
+	createdAt: DateTime!
+	"""
+	Last update timestamp
+	"""
+	updatedAt: DateTime!
+}
+
+"""
+Per-instance embedding status for DataBraid observability.
+
+Returned on `MetaInstanceSDK.embeddingStatus` and the standalone
+`embeddingStatus(metaType, metaId)` query. Computed from existing
+`metas` columns — no migration required.
+"""
+type MetaEmbeddingStatus {
+	"""
+	Overall state for this (metaType, metaId) pair
+	"""
+	state: EmbeddingState!
+	"""
+	Total meta rows for this instance
+	"""
+	totalMetas: Int!
+	"""
+	Rows with a current-model embedding
+	"""
+	embeddedCount: Int!
+	"""
+	Most recent embedding timestamp (unix epoch)
+	"""
+	embeddedAt: Int
+	"""
+	Model name used for completed embeddings
+	"""
+	model: String
+}
+
+"""
+Filter for metadata queries
+"""
+input MetaFilter {
+	"""
+	Filter by meta type
+	"""
+	metaType: String
+	"""
+	Filter by meta ID
+	"""
+	metaId: String
+	"""
+	Filter by specific key
+	"""
+	key: String
+	"""
+	Filter by value pattern
+	"""
+	value: String
+	"""
+	SDK-compatible comparison operator (=, !=, <, >, <=, >=, LIKE, NOT LIKE, ILIKE, NOT ILIKE)
+	Used with key/value for simple filters. Defaults to "=" when absent.
+	"""
+	comparison: String
+	"""
+	SDK-compatible filter criterion for chaining multiple filters ("and" or "or")
+	"""
+	criterion: String
+	"""
+	Complex filter conditions (AND logic) — alternative to comparison/criterion
+	"""
+	conditions: [MetaFilterCondition!]
+	"""
+	Filter by creation date (after this timestamp)
+	"""
+	createdAfter: Int
+	"""
+	Filter by creation date (before this timestamp)
+	"""
+	createdBefore: Int
+	"""
+	Get only the latest value for each key
+	"""
+	latestOnly: Boolean
+	"""
+	Maximum number of results
+	"""
+	limit: Int
+	"""
+	Offset for pagination
+	"""
+	offset: Int
+}
+
+"""
+Filter condition for metadata queries
+"""
+input MetaFilterCondition {
+	"""
+	Metadata key to filter on
+	"""
+	key: String!
+	"""
+	Comparison operator
+	"""
+	operator: ComparisonOperator!
+	"""
+	Value to compare against
+	"""
+	value: String!
+}
+
+"""
+Key-value pair input for metadata queries (PHP schema MetaInput compatibility)
+"""
+input MetaInput {
+	"""
+	Metadata key
+	"""
+	key: String
+	"""
+	Metadata value
+	"""
+	value: String
+}
+
+type MetaInstance {
+	metaType: String!
+	metaId: String!
+	data: [MetaKeyValue!]!
+	createdAt: DateTime!
+	updatedAt: DateTime!
+	"""
+	Get a specific key value
+	"""
+	get(key: String!): String
+	"""
+	Check if a key exists
+	"""
+	has(key: String!): Boolean!
+	"""
+	Count of keys in this instance
+	"""
+	keyCount: Int!
+}
+
+type MetaInstanceSDK {
+	metaType: String!
+	metaId: String!
+	createdAt: DateTime!
+	"""
+	Get metas for this instance (SDK expects nested metas field)
+	Supports filtering by keys and values arrays
+	"""
+	metas(latest: Boolean! = false, keys: [String!], values: [String!]): [MetaItemSDK!]!
+	"""
+	Alias for first meta key (SDK compatibility)
+	"""
+	key: String
+	"""
+	Alias for first meta value (SDK compatibility)
+	"""
+	value: String
+	"""
+	Embedding status for this meta instance (DataBraid observability).
+	
+	Returns `null` when embedding is disabled (`EMBEDDING_ENABLED=false`).
+	Apps use this to render spinner/badge indicators per meta asset.
+	"""
+	embeddingStatus: MetaEmbeddingStatus
+	"""
+	Get all molecules that created metadata for this instance (PHP schema parity)
+	Collects distinct molecular_hashes from metas and loads full Molecule objects.
+	"""
+	molecules: [Molecule!]!
+	"""
+	Singular molecule — returns the latest molecule for this instance (PHP MetaInstanceViaAtom parity)
+	"""
+	molecule: Molecule
+	"""
+	All atoms from all molecules associated with this instance (PHP MetaInstance parity)
+	"""
+	atoms: [Atom!]!
+	"""
+	Singular atom — returns the first atom from the latest molecule (PHP MetaInstanceViaAtom parity)
+	"""
+	atom: Atom
+}
+
+"""
+GraphQL input type for metadata items
+Matches PHP server MetaInput: key is required, value is nullable
+"""
+input MetaItemInput {
+	key: String!
+	"""
+	Value can be null - SDK sends null values for some meta entries
+	"""
+	value: String
+}
+
+"""
+Individual meta item within instance (SDK compatibility)
+"""
+type MetaItemSDK {
+	"""
+	Associated molecular hash
+	"""
+	molecularHash: String
+	"""
+	Position (from wallet/atom)
+	"""
+	position: String
+	"""
+	Meta key
+	"""
+	key: String!
+	"""
+	Meta value
+	"""
+	value: String!
+	"""
+	Creation timestamp
+	"""
+	createdAt: DateTime!
+}
+
+"""
+MetaKeyValue: Key-value pair in metadata
+"""
+type MetaKeyValue {
+	key: String!
+	value: String!
+	createdAt: DateTime!
+	molecularHash: String
+	"""
+	Position from sender atom (index=0) of the molecule that wrote this meta
+	"""
+	position: String
+}
+
+"""
+GraphQL type for semantic search results
+"""
+type MetaSemanticResult {
+	"""
+	Metadata type
+	"""
+	metaType: String!
+	"""
+	Instance identifier
+	"""
+	metaId: String!
+	"""
+	Metadata key
+	"""
+	key: String!
+	"""
+	Metadata value
+	"""
+	value: String!
+	"""
+	Cosine similarity score (0.0 to 1.0)
+	"""
+	similarity: Float!
+	"""
+	Molecular hash of the molecule that stored this meta (for DAG node lookup)
+	"""
+	molecularHash: String
+}
+
+"""
+Key-value pair for atom metadata in DAG visualization tooltips.
+"""
+type MetaSummaryItem {
+	key: String!
+	value: String
+}
+
+type MetaType {
+	metaType: String!
+	instanceCount: Int!
+	entryCount: Int!
+	latestUpdate: DateTime!
+	"""
+	Get all metadata instances for this type
+	"""
+	instances(
+		"""
+		Maximum number of instances to return
+		"""
+		limit: Int,
+		"""
+		Offset for pagination
+		"""
+		offset: Int
+	): [MetaInstance!]!
+}
+
+type MetaTypeSDK {
+	metaType: String!
+	metaId: String
+	instanceCount: [InstanceCount!]!
+	instances: [MetaInstanceSDK!]!
+	paginatorInfo: PaginatorInfo!
+}
+
+type Molecule {
+	id: ID!
+	molecularHash: String!
+	bundle: String
+	"""
+	Bundle hash alias for PHP schema compatibility
+	PHP server uses `bundleHash` while Rust uses `bundle`
+	"""
+	bundleHash: String
+	cellSlug: String
+	status: String!
+	createdAt: DateTime!
+	processedAt: DateTime
+	reason: String
+	"""
+	Get all atoms in this molecule using DataLoader
+	"""
+	atoms: [Atom!]!
+	"""
+	Count of atoms in this molecule
+	"""
+	atomCount: Int!
+	"""
+	Check if molecule was accepted
+	"""
+	isAccepted: Boolean!
+	"""
+	Check if molecule was rejected
+	"""
+	isRejected: Boolean!
+	"""
+	Check if molecule is still pending
+	"""
+	isPending: Boolean!
+	"""
+	Parent molecule hashes (references to 1-8 parent molecules)
+	"""
+	parentHashes: [String!]!
+	"""
+	DAG height (0 for genesis, increases with each generation)
+	"""
+	height: Int!
+	"""
+	Cumulative weight (number of descendants + 1, used for tip selection)
+	"""
+	cumulativeWeight: Int!
+	"""
+	Direct validation confidence score (0-100)
+	"""
+	directConfidence: Float!
+	"""
+	Cascaded confidence from ancestors (0-100)
+	"""
+	cumulativeConfidence: Float!
+	"""
+	Get parent molecules using DataLoader
+	"""
+	parents: [Molecule!]!
+	"""
+	Get child molecules using DataLoader
+	"""
+	children: [Molecule!]!
+	"""
+	Check if this molecule is a genesis molecule (no parents)
+	"""
+	isGenesis: Boolean!
+	"""
+	Check if this molecule is a tip (no children, not referenced by others)
+	"""
+	isTip: Boolean!
+}
+
+"""
+Filter for molecule queries
+"""
+input MoleculeFilter {
+	"""
+	Filter by molecular hash
+	"""
+	molecularHash: String
+	"""
+	Filter by bundle hash
+	"""
+	bundleHash: String
+	"""
+	Filter by cell slug
+	"""
+	cellSlug: String
+	"""
+	Filter by status (accepted, pending, rejected)
+	"""
+	statuses: [String!]
+	"""
+	Filter by creation date (after this timestamp)
+	"""
+	createdAfter: Int
+	"""
+	Filter by creation date (before this timestamp)
+	"""
+	createdBefore: Int
+	"""
+	Maximum number of results
+	"""
+	limit: Int
+	"""
+	Offset for pagination
+	"""
+	offset: Int
+	"""
+	Order by field (created_at, molecular_hash)
+	"""
+	orderBy: String
+	"""
+	Sort direction (ASC, DESC)
+	"""
+	orderDirection: String
+}
+
+"""
+GraphQL input type for molecules
+"""
+input MoleculeInput {
+	molecularHash: String!
+	bundle: String
+	cellSlug: String
+	"""
+	Cell slug origin from SDK (tracking where molecule originated)
+	"""
+	cellSlugOrigin: String
+	createdAt: String
+	status: String
+	atoms: [AtomInput!]!
+	version: String
+	"""
+	Source wallet metadata from SDK (for tracking, not validation)
+	"""
+	sourceWallet: JSON
+	"""
+	Remainder wallet metadata from SDK (for tracking, not validation)
+	"""
+	remainderWallet: JSON
+	"""
+	Parent molecule hashes for DAG structure (1-8 parents, empty for genesis)
+	"""
+	parentHashes: [String!]! = []
+}
+
+"""
+GraphQL output type for molecule responses
+Matches SDK expected fields: molecularHash, height, depth, status, reason, payload, createdAt, receivedAt, processedAt, broadcastedAt
+"""
+type MoleculeResponse {
+	status: String!
+	molecularHash: String!
+	token: String
+	pubkey: String
+	expiresAt: Int
+	reason: String
+	payload: String
+	"""
+	SDK-compatible timestamps
+	"""
+	createdAt: String
+	receivedAt: String
+	processedAt: String
+	broadcastedAt: String
+	"""
+	DAG structure fields
+	"""
+	height: Int
+	depth: Int
+}
+
+type Mutation {
+	"""
+	Request a guest authentication token
+	PascalCase variant for backward compatibility
+	"""
+	AccessToken(cellSlug: String, pubkey: String, encrypt: Boolean): AuthToken!
+	"""
+	Request a guest authentication token
+	camelCase variant for SDK compatibility
+	"""
+	accessToken(cellSlug: String, pubkey: String, encrypt: Boolean): AuthToken!
+	"""
+	Submit a molecule for validation and authorization
+	PascalCase variant for backward compatibility
+	"""
+	ProposeMolecule(molecule: MoleculeInput!): MoleculeResponse!
+	"""
+	Submit a molecule for validation and authorization
+	camelCase variant for SDK compatibility
+	"""
+	proposeMolecule(molecule: MoleculeInput!): MoleculeResponse!
+	"""
+	Submit an authenticated molecule with explicit token parameter
+	PascalCase variant for backward compatibility
+	"""
+	ProposeMoleculeWithToken(molecule: MoleculeInput!, token: String!): MoleculeResponse!
+	"""
+	Submit an authenticated molecule with explicit token parameter
+	camelCase variant for SDK compatibility
+	"""
+	proposeMoleculeWithToken(molecule: MoleculeInput!, token: String!): MoleculeResponse!
+	"""
+	Record active user session
+	Matches SDK MutationActiveSession
+	"""
+	ActiveSession(bundleHash: String!, metaType: String!, metaId: String!, ipAddress: String, browser: String, osCpu: String, resolution: String, timeZone: String, json: String): ActiveSessionResponse!
+	"""
+	Link an external identifier to a wallet bundle
+	Matches SDK MutationLinkIdentifier
+	"""
+	LinkIdentifier(bundle: String!, type: String!, content: String!): LinkIdentifierResponse!
+}
+
+"""
+Paginator info (SDK compatibility)
+"""
+type PaginatorInfo {
+	currentPage: Int!
+	total: Int!
+}
+
+"""
+Policy record returned by Policy query
+Aligned with TypeScript SDK QueryPolicy expectations
+"""
+type Policy {
+	"""
+	Molecular hash that created this policy
+	"""
+	molecularHash: String
+	"""
+	Wallet position that created this policy
+	"""
+	position: String
+	"""
+	Meta type this policy applies to
+	"""
+	metaType: String!
+	"""
+	Meta ID this policy applies to
+	"""
+	metaId: String
+	"""
+	Conditions for policy evaluation (JSON)
+	"""
+	conditions: JSON
+	"""
+	Callback configuration (JSON)
+	"""
+	callback: JSON
+	"""
+	Rule definition (JSON)
+	"""
+	rule: JSON
+	"""
+	Creation timestamp
+	"""
+	createdAt: Int
+}
+
+"""
+Query arguments for pagination (PHP SDK compatibility)
+"""
+input QueryArgs {
+	"""
+	Number of items per page
+	"""
+	limit: Int
+	"""
+	Offset for pagination (SDK sends "offset", not "page")
+	"""
+	offset: Int
+	"""
+	Order by field
+	"""
+	orderBy: String
+	"""
+	Sort direction (asc/desc)
+	"""
+	order: String
+}
+
+"""
+Merged root query combining system and data queries
+"""
+type QueryRoot {
+	"""
+	Health check endpoint
+	"""
+	health: String!
+	"""
+	Server version
+	"""
+	version: String!
+	"""
+	API version + the set of currently-deprecated schema fields (QA-008).
+	"""
+	apiVersion: ApiVersion!
+	"""
+	Get wallet by address
+	"""
+	wallet(address: String!): Wallet
+	"""
+	Get wallets for a bundle hash
+	"""
+	wallets(bundleHash: String!, limit: Int! = 100, offset: Int! = 0): [Wallet!]!
+	"""
+	Get ContinuId wallet (identity wallet) for a bundle
+	Returns the first wallet created in the bundle
+	PascalCase variant for backward compatibility
+	"""
+	ContinuId(bundle: String!, token: String): Wallet
+	"""
+	Get ContinuId wallet (identity wallet) for a bundle
+	Returns the first wallet created in the bundle
+	camelCase variant for SDK compatibility
+	"""
+	continuId(bundle: String!, token: String): Wallet
+	"""
+	SDK-compatible Balance query (returns single wallet)
+	PascalCase variant for SDK compatibility
+	Returns the best matching non-shadow wallet (highest balance)
+	Matches PHP server behavior: single object, not array
+	"""
+	Balance(address: String, addresses: [String!], bundleHash: String, bundleHashes: [String!], type: String, token: String, tokens: [String!], tokenSlug: String, position: String, positions: [String!]): Wallet
+	"""
+	Get wallet balance for a specific token (aggregated)
+	Legacy query - returns aggregated balance
+	"""
+	balanceAggregated(bundleHash: String!, tokenSlug: String!): Balance
+	"""
+	Get all balances for a wallet bundle (aggregated)
+	"""
+	balances(bundleHash: String!): [Balance!]!
+	"""
+	Get token by slug
+	"""
+	token(slug: String!): Token
+	"""
+	Get all tokens with pagination
+	"""
+	tokens(limit: Int! = 100, offset: Int! = 0): [Token!]!
+	"""
+	SDK-compatible Token query (PascalCase)
+	Supports single slug, multiple slugs, limit, and order parameters
+	"""
+	Token(slug: String, slugs: [String!], limit: Int, order: String): [Token!]!
+	"""
+	SDK-compatible Wallet query (PascalCase)
+	Supports bundleHash, token/tokenSlug, and unspent filtering
+	Accepts both 'token' (preferred) and 'tokenSlug' (legacy) for backward compatibility
+	"""
+	Wallet(bundleHash: String, token: String, tokenSlug: String, tokens: [String!], unspent: Boolean): [Wallet!]!
+	"""
+	Get shadow wallets for a bundle
+	Shadow wallets have address=NULL and hold unclaimed balance from transfers
+	Accepts both 'token' (preferred) and 'tokenSlug' (legacy) for backward compatibility
+	"""
+	ShadowWallets(bundleHash: String!, token: String, tokenSlug: String): [Wallet!]!
+	"""
+	Get total shadow wallet balance for a bundle
+	Returns the sum of all unclaimed transfers
+	Accepts both 'token' (preferred) and 'tokenSlug' (legacy) for backward compatibility
+	"""
+	ShadowBalance(bundleHash: String!, token: String, tokenSlug: String): String!
+	"""
+	Get cell by slug
+	"""
+	cell(slug: String!): Cell
+	"""
+	Get all cells with pagination
+	"""
+	cells(limit: Int! = 100, offset: Int! = 0): [Cell!]!
+	"""
+	SDK-compatible Cell query (PascalCase)
+	Supports single slug, multiple slugs, limit, and order parameters
+	"""
+	Cell(slug: String, slugs: [String!], limit: Int, order: String): [Cell!]!
+	"""
+	Get wallet bundle by hash (snake_case variant)
+	"""
+	walletBundle(bundleHash: String!): WalletBundle
+	"""
+	Get wallet bundles by hashes (PascalCase variant for SDK compatibility)
+	Accepts an array of bundle hashes per SDK QueryWalletBundle expectations
+	Supports metadata filtering via key/keys and value/values parameters
+	"""
+	WalletBundle(bundleHash: String, bundleHashes: [String!], key: String, keys: [String!], value: String, values: [String!], keys_values: [MetaInput!], latest: Boolean, limit: Int, order: String): [WalletBundle!]!
+	"""
+	Get molecule by molecular hash
+	"""
+	molecule(hash: String!): Molecule
+	"""
+	Get molecules with filter
+	"""
+	molecules(filter: MoleculeFilter, limit: Int! = 100, offset: Int! = 0): [Molecule!]!
+	"""
+	SDK-compatible Molecule query (PascalCase)
+	Supports all PHP schema parameters for molecule querying
+	"""
+	Molecule(lastMolecularHashes: [String!], firstMolecularHashes: [String!], molecularHash: String, molecularHashes: [String!], cellSlug: String, cellSlugs: [String!], tokenSlug: String, tokenSlugs: [String!], bundleHash: String, bundleHashes: [String!], walletAddress: String, walletAddresses: [String!], status: String, statuses: [String!], local: Boolean, algorithm: String, limit: Int, order: String): [Molecule!]!
+	"""
+	Get DAG window: molecules within a height range for visualization.
+	
+	Returns a lightweight projection optimized for the DAG Explorer.
+	Edges are reconstructed client-side from parentHashes on each node.
+	
+	# Example
+	```graphql
+	query {
+	dagWindow(cellSlug: "my_app", minHeight: 0, maxHeight: 500, limit: 10000) {
+	nodes { molecularHash status height parentHashes }
+	maxHeight
+	totalCount
+	}
+	}
+	```
+	"""
+	dagWindow(cellSlug: String!, minHeight: Int! = 0, maxHeight: Int! = 500, limit: Int! = 10000): DagWindowResponse!
+	"""
+	Search metadata by filter
+	"""
+	metas(filter: MetaFilter!): [Meta!]!
+	"""
+	Get metadata types with statistics
+	"""
+	metaTypes(limit: Int! = 100, offset: Int! = 0): [MetaType!]!
+	"""
+	Get metadata instances for a type
+	"""
+	metaInstances(metaType: String!, limit: Int! = 100, offset: Int! = 0): [MetaInstance!]!
+	"""
+	SDK-compatible MetaType query
+	Supports complex filtering with single or array parameters
+	"""
+	MetaType(metaType: String, metaTypes: [String!], metaId: String, metaIds: [String!], key: String, keys: [String!], value: String, values: [String!], count: String, filter: [MetaFilter!], queryArgs: QueryArgs, countBy: String, cellSlug: String, cellSlugs: [String!], bundleHash: String, latestMetas: Boolean, latest: Boolean, limit: Int, offset: Int, orderBy: String, order: String): [MetaTypeSDK!]!
+	"""
+	Query atoms with complex filtering
+	Matches SDK QueryAtom.ts
+	"""
+	Atom(molecularHashes: [String!], bundleHashes: [String!], positions: [String!], walletAddresses: [String!], isotopes: [String!], tokenSlugs: [String!], cellSlugs: [String!], batchIds: [String!], values: [String!], metaTypes: [String!], metaIds: [String!], indexes: [String!], filter: [MetaFilter!], latest: Boolean, queryArgs: QueryArgs): AtomResponse!
+	"""
+	Query active users/sessions
+	Matches SDK QueryActiveSession.ts (returns ActiveUser)
+	"""
+	ActiveUser(bundleHash: String, metaType: String, metaId: String): [ActiveUser!]!
+	"""
+	Query policies for metadata access control
+	Matches SDK QueryPolicy.ts
+	"""
+	Policy(metaType: String, metaId: String, key: String): [Policy!]!
+	"""
+	Query batch by batch ID
+	Returns the batch tree with all descendants
+	Matches SDK QueryBatch.ts
+	"""
+	Batch(batchId: String): [BatchInstance!]!
+	"""
+	Query batch history by batch ID
+	Returns the linear parent chain (lineage)
+	Matches SDK QueryBatchHistory.ts
+	"""
+	BatchHistory(batchId: String): [BatchInstance!]!
+	"""
+	SDK-compatible MetaTypeViaAtom query
+	Alternative atom-based meta querying with atomValues and cellSlugs filtering
+	Matches SDK QueryMetaTypeViaAtom.ts
+	"""
+	MetaTypeViaAtom(metaTypes: [String!], metaIds: [String!], atomValues: [String!], cellSlugs: [String!], filter: [MetaFilter!], latest: Boolean, queryArgs: QueryArgs, countBy: String, bundleHash: String, molecularHashes: [String!], bundleHashes: [String!], positions: [String!], walletAddresses: [String!], isotopes: [String!], tokenSlugs: [String!], batchIds: [String!], indexes: [Int!]): [MetaTypeSDK!]!
+	"""
+	Per-instance embedding status for DataBraid observability.
+	
+	Supports both single-asset and bulk modes:
+	- **Single**: pass `metaType` + `metaId` for one instance
+	- **Bulk**: pass `instances` array for many instances in one round trip
+	
+	Returns an empty list when embedding is disabled.
+	Instances with no `metas` rows are returned as `PENDING` with zero counts.
+	
+	# Examples
+	```graphql
+	# Single instance
+	query {
+	embeddingStatus(metaType: "product", metaId: "SKU-001") {
+	metaType metaId state totalMetas embeddedCount
+	}
+	}
+	
+	# Bulk — one round trip for the whole list
+	query {
+	embeddingStatus(instances: [
+	{ metaType: "product", metaId: "SKU-001" },
+	{ metaType: "product", metaId: "SKU-002" },
+	{ metaType: "profile", metaId: "user_42" }
+	]) {
+	metaType metaId state totalMetas embeddedCount embeddedAt model
+	}
+	}
+	```
+	"""
+	embeddingStatus(
+		"""
+		Metadata type (single-instance mode)
+		"""
+		metaType: String,
+		"""
+		Instance identifier (single-instance mode)
+		"""
+		metaId: String,
+		"""
+		Array of (metaType, metaId) pairs (bulk mode)
+		"""
+		instances: [EmbeddingStatusInput!]
+	): [EmbeddingStatusItem!]!
+	"""
+	Semantic search across metadata using vector embeddings (GAP-06-002)
+	
+	Requires pgvector extension and pre-computed embeddings in the metas table.
+	The caller is responsible for generating the query embedding (text → vector).
+	"""
+	searchMetasSemantic(
+		"""
+		Pre-computed query embedding vector (1536 dimensions)
+		"""
+		queryEmbedding: [Float!]!,
+		"""
+		Optional filter by meta_type
+		"""
+		metaType: String,
+		"""
+		Minimum cosine similarity (0.0-1.0)
+		"""
+		similarityThreshold: Float,
+		"""
+		Maximum number of results
+		"""
+		limit: Int! = 10
+	): [MetaSemanticResult!]!
+	"""
+	Text-based semantic search across metadata (DataBraid VKG).
+	
+	Unlike `searchMetasSemantic` which requires a pre-computed embedding vector,
+	this query accepts a plain text string. The server generates the embedding
+	via the configured `EMBEDDING_PROVIDER` (OpenAI-compatible by default),
+	then performs cosine similarity search via pgvector.
+	
+	Requires the embedding service to be enabled (`EMBEDDING_ENABLED=true`).
+	"""
+	searchMetasByText(
+		"""
+		Natural language search query
+		"""
+		query: String!,
+		"""
+		Optional filter by meta_type
+		"""
+		metaType: String,
+		"""
+		Minimum cosine similarity (0.0-1.0, default 0.7)
+		"""
+		similarityThreshold: Float,
+		"""
+		Maximum number of results (default 10, max 100)
+		"""
+		limit: Int! = 10
+	): [MetaSemanticResult!]!
+	"""
+	Ask a natural language question about DAG data (RAG pipeline).
+	
+	Couples semantic search with local LLM generation to produce synthesized
+	answers from ledger data. Pipeline: embed question → pgvector search →
+	format context → LLM generation → natural language answer.
+	
+	Requires both embedding service (`EMBEDDING_ENABLED=true`) and
+	generation service (`GENERATION_ENABLED=true`).
+	"""
+	askDag(
+		"""
+		Natural language question about DAG data
+		"""
+		question: String!,
+		"""
+		Optional filter by meta_type
+		"""
+		metaType: String,
+		"""
+		Maximum source records to consider (default 20)
+		"""
+		maxResults: Int! = 20,
+		"""
+		Minimum cosine similarity (default 0.5)
+		"""
+		similarityThreshold: Float! = 0.5
+	): DagAnswer!
+	"""
+	Sync inventory: returns accepted molecular hashes for a cell/height range.
+	Used by peer nodes for hash-based state synchronization (WP-003, Patent §6.19).
+	"""
+	syncInventory(		cellSlug: String!,		minHeight: Int!,		maxHeight: Int!,
+		"""
+		Max hashes to return (default 50000, hard cap 100000)
+		"""
+		cap: Int
+	): SyncInventoryResult!
+	"""
+	Sync molecules: returns full molecule + atom data for replay.
+	Used by syncing nodes to fetch missing molecules (WP-003, Patent §6.19).
+	Capped at 100 molecules per request.
+	"""
+	syncMolecules(molecularHashes: [String!]!): [SyncMolecule!]!
+}
+
+type SubscriptionRoot {
+	"""
+	Subscribe to DAG structure changes for real-time visualization.
+	
+	Emits events when molecules are accepted into the DAG and when bonds
+	(parent-child edges) are created. Designed for the DAG Explorer UI.
+	
+	Events are emitted directly from application code after bond creation
+	via an in-process broadcast channel, so this works in every deployment.
+	
+	# Arguments
+	* `cell_slug` - Optional cell slug to filter events. If not provided, receives all events.
+	
+	# Example
+	```graphql
+	subscription {
+	dagChanges(cellSlug: "my_app") {
+	eventType
+	molecularHash
+	status
+	height
+	cumulativeWeight
+	parentHashes
+	bondHash
+	}
+	}
+	```
+	"""
+	dagChanges(cellSlug: String): DagChange!
+	"""
+	Subscribe to molecule-status changes for a wallet bundle (WP-016).
+	
+	Emits when a molecule submitted by `bundle` is accepted, carrying the full
+	molecule (atoms + metas) per the SDK's `onCreateMolecule($bundle)`
+	selection. Powered by the same in-process broadcast pattern as
+	`dagChanges` — no external CDC, works in every deployment.
+	
+	# Example
+	```graphql
+	subscription onCreateMolecule($bundle: String!) {
+	CreateMolecule(bundle: $bundle) { molecularHash status atoms { isotope } }
+	}
+	```
+	"""
+	CreateMolecule(bundle: String!): CreateMolecule!
+	"""
+	Subscribe to balance changes for a `(bundle, token)` wallet (WP-016 Slice 2).
+	
+	Emits whenever a molecule changes that wallet's balance (debit, credit,
+	remainder, mint, buffer, fusion), carrying the post-commit summed balance.
+	Same in-process broadcast pattern as `dagChanges`/`CreateMolecule`.
+	
+	# Example
+	```graphql
+	subscription onWalletStatus($bundle: String!, $token: String!) {
+	WalletStatus(bundle: $bundle, token: $token) { bundle token admission balance }
+	}
+	```
+	"""
+	WalletStatus(bundle: String!, token: String!): WalletStatus!
+	"""
+	Subscribe to session-presence changes for a `(metaType, metaId)` user
+	(WP-016 Slice 4).
+	
+	Emits whenever an `ActiveSession` mutation upserts a session for that
+	`(metaType, metaId)`. Same in-process broadcast pattern as
+	`dagChanges`/`WalletStatus`. P-isotope peer heartbeats do not emit here.
+	
+	# Example
+	```graphql
+	subscription onActiveUser($metaType: String!, $metaId: String!) {
+	ActiveUser(metaType: $metaType, metaId: $metaId) {
+	bundleHash metaType metaId jsonData createdAt updatedAt
+	}
+	}
+	```
+	"""
+	ActiveUser(metaType: String!, metaId: String!): ActiveUser!
+	"""
+	Subscribe to wallet changes for a `bundle` (WP-016 Slice 3 — closes WP-016).
+	
+	Emits the spendable wallet record for each `(bundle, token)` a molecule
+	changes. Same in-process broadcast pattern as `dagChanges`/`WalletStatus`;
+	the SDK's nested `walletBundle`/`token`/`metas` resolve lazily via ctx.
+	
+	# Example
+	```graphql
+	subscription onActiveWallet($bundle: String!) {
+	ActiveWallet(bundle: $bundle) {
+	address bundleHash tokenSlug position amount
+	walletBundle { bundleHash slug createdAt }
+	token { slug name fungibility supply decimals amount icon createdAt }
+	metas { molecularHash position metaType metaId key value createdAt }
+	}
+	}
+	```
+	"""
+	ActiveWallet(bundle: String!): Wallet!
+	"""
+	Subscribe to embedding progress events for DataBraid observability.
+	
+	Emits events when meta rows are embedded, allowing apps to update
+	spinner badges to completion indicators in real time.
+	
+	Events are emitted directly from the embedding pipeline via an in-process
+	broadcast channel, so this works in every deployment.
+	
+	# Arguments
+	* `meta_type` - Optional filter by metadata type
+	* `meta_id` - Optional filter by instance identifier
+	
+	# Example
+	```graphql
+	subscription {
+	embeddingChanges(metaType: "product", metaId: "SKU-001") {
+	metaType
+	metaId
+	key
+	state
+	model
+	embeddedAt
+	molecularHash
+	}
+	}
+	```
+	"""
+	embeddingChanges(metaType: String, metaId: String): EmbeddingChange!
+}
+
+"""
+Atom data exported for sync replay
+"""
+type SyncAtom {
+	position: String!
+	walletAddress: String!
+	isotope: String!
+	token: String!
+	value: String
+	metaType: String
+	metaId: String
+	index: Int
+	otsFragment: String
+	batchId: String
+	createdAt: String!
+	metasJson: String
+}
+
+"""
+Response for syncInventory query
+"""
+type SyncInventoryResult {
+	"""
+	Accepted molecular hashes in the requested height range
+	"""
+	hashes: [String!]!
+	"""
+	Actual maximum height of accepted molecules in this cell
+	"""
+	maxHeight: Int!
+	"""
+	Total count of molecules returned
+	"""
+	totalCount: Int!
+}
+
+"""
+Molecule data exported for sync replay
+"""
+type SyncMolecule {
+	molecularHash: String!
+	bundle: String
+	cellSlug: String
+	createdAt: String!
+	parentHashes: [String!]!
+	atoms: [SyncAtom!]!
+}
+
+type Token {
+	id: ID!
+	slug: String!
+	name: String!
+	supply: String
+	"""
+	Amount field - alias for supply for SDK compatibility
+	"""
+	amount: String
+	decimals: Int!
+	fungibility: String!
+	icon: String
+	createdAt: DateTime!
+	updatedAt: DateTime!
+	"""
+	Check if token is fungible
+	"""
+	isFungible: Boolean!
+	"""
+	Check if token is non-fungible (NFT)
+	"""
+	isNft: Boolean!
+	"""
+	Check if supply is infinite
+	"""
+	hasInfiniteSupply: Boolean!
+}
+
+"""
+Token unit for batch transfers
+Matches PHP server TokenUnit type
+"""
+type TokenUnit {
+	"""
+	Token unit ID
+	"""
+	id: String
+	"""
+	Token unit name
+	"""
+	name: String
+	"""
+	Metadata associated with this token unit
+	"""
+	metas: String
+}
+
+"""
+Token unit information (stub for SDK compatibility)
+"""
+type TokenUnitInfo {
+	id: String!
+	name: String!
+	metas: String
+}
+
+"""
+Trade rate information (stub for SDK compatibility)
+"""
+type TradeRate {
+	tokenSlug: String!
+	amount: String!
+}
+
+type Wallet {
+	id: ID!
+	address: String
+	position: String
+	"""
+	Whether this is a shadow wallet (unclaimed transfer)
+	Shadow wallets have address=NULL and cannot be used for signing
+	"""
+	isShadow: Boolean!
+	bundleHash: String!
+	tokenSlug: String!
+	balance: String!
+	pubkey: String
+	"""
+	Batch ID for grouped transactions
+	"""
+	batchId: String
+	"""
+	Character encoding
+	"""
+	characters: String
+	"""
+	Balance as "amount" for SDK compatibility
+	Some SDKs expect "amount" instead of "balance"
+	"""
+	amount: String!
+	createdAt: DateTime!
+	updatedAt: DateTime!
+	"""
+	Resolve token relationship using DataLoader
+	"""
+	token: Token
+	"""
+	Check if wallet has non-zero balance
+	"""
+	hasBalance: Boolean!
+	"""
+	Parse balance as f64 (for display purposes)
+	"""
+	balanceFloat: Float!
+	"""
+	Token units owned by this wallet (stackable / NFT). gap SDK-001 Phase 1: returns the units
+	persisted at createToken from the `token_units` table (genesis store + query). Per-unit
+	ownership movement on transfer/burn is Phase 2 (V-isotope) — until then units stay with the
+	creator wallet. Shadow wallets (no address) own no units.
+	"""
+	tokenUnits: [TokenUnitInfo!]!
+	"""
+	Trade rates for buffer operations (SDK compatibility).
+	TRACKED-INCOMPLETE (gap SDK-001): permanent empty-array stub; buffer/trade-rate
+	computation is not yet implemented server-side. Audit 2026-05-28 P3.
+	"""
+	tradeRates: [TradeRate!]!
+	"""
+	Wallet type field for SDK compatibility
+	Returns the token slug as the "type" (SDK uses this field)
+	"""
+	type: String!
+	"""
+	The wallet bundle (user identity) this wallet belongs to.
+	WP-016 Slice 3: the SDK's ActiveWallet selection includes
+	`walletBundle { bundleHash, slug, createdAt }`. Resolved lazily from the
+	`wallet_bundles` row for this wallet's bundle_hash.
+	"""
+	walletBundle: WalletBundle
+	"""
+	Metadata associated with this wallet (WP-016 Slice 3 — ActiveWallet `metas`).
+	Wallet metas are keyed by `metas.meta_id = wallet.address` (per the PHP
+	server, authoritative); `position` comes from the `atoms` table (the
+	`metas` table has no position column), correlated by molecular_hash +
+	meta_id so each meta yields a single position. Shadow wallets (address
+	NULL) have no metas.
+	"""
+	metas: [WalletMeta!]!
+}
+
+type WalletBundle {
+	id: ID!
+	bundleHash: String!
+	"""
+	Human-readable bundle slug (SDK ActiveWallet `walletBundle.slug`).
+	TRACKED-INCOMPLETE: `wallet_bundles` has no `slug` column — no validator
+	source today (like `admission` / `tokenUnits`). Exposed as nullable so the
+	SDK's `walletBundle { slug }` selection resolves; returns None until a
+	slug source is defined.
+	"""
+	slug: String
+	createdAt: DateTime!
+	updatedAt: DateTime!
+	lastActivityAt: DateTime
+	"""
+	Get all wallets in this bundle using DataLoader
+	"""
+	wallets: [Wallet!]!
+	"""
+	Get wallets for a specific token
+	"""
+	walletsForToken(tokenSlug: String!): [Wallet!]!
+	"""
+	Count of unique tokens in this bundle
+	"""
+	tokenCount: Int!
+	"""
+	Check if bundle has been active recently (within last 30 days)
+	"""
+	isActive: Boolean!
+	"""
+	Get metadata associated with this wallet bundle.
+	SDK selects: molecularHash, position, key, value, createdAt.
+	`position` is NOT a column on `metas` — it comes from the `atoms` table
+	(correlated by molecular_hash + meta_id, mirroring `Wallet.metas`). A prior
+	`SELECT position FROM metas` errored at runtime (no such column).
+	"""
+	metas: [MetaItemSDK!]!
+}
+
+"""
+Metadata item attached to a wallet (WP-016 Slice 3 — ActiveWallet `metas`).
+Matches the SDK selection `{ molecularHash, position, metaType, metaId, key,
+value, createdAt }`. A dedicated type because `MetaItemSDK` lacks
+metaType/metaId and `Meta` lacks position — neither is a faithful shape.
+"""
+type WalletMeta {
+	molecularHash: String
+	position: String
+	metaType: String
+	metaId: String
+	key: String!
+	value: String!
+	createdAt: DateTime!
+}
+
+"""
+GraphQL type for the `WalletStatus` subscription (WP-016 Slice 2). Matches the
+SDK `onWalletStatus($bundle, $token)` selection: `{ bundle, token, admission,
+balance }`. `admission` is currently always `None` (no validator source yet).
+"""
+type WalletStatus {
+	bundle: String!
+	token: String!
+	admission: String
+	balance: String!
+}
+
+"""
+Marks an element of a GraphQL schema as no longer supported.
+"""
+directive @deprecated(reason: String = "No longer supported") on FIELD_DEFINITION | ARGUMENT_DEFINITION | INPUT_FIELD_DEFINITION | ENUM_VALUE
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: QueryRoot
+	mutation: Mutation
+	subscription: SubscriptionRoot
+}

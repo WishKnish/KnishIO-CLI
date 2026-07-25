@@ -11,15 +11,25 @@
 //! Ctrl-C sends a graceful `complete` + closes the socket cleanly so
 //! the server-side subscription isn't left dangling.
 //!
-//! Two subjects:
-//!   * `embeddings` — DataBraid embedding-pipeline events
-//!     (`embeddingChanges` subscription, in-process broadcast).
-//!   * `dag` — DAG structure events (`dagChanges`, in-process broadcast).
+//! Six subjects, one per subscription the validator implements:
+//!   * `embeddings`     — DataBraid embedding-pipeline events (`embeddingChanges`)
+//!   * `dag`            — DAG structure events (`dagChanges`)
+//!   * `molecules`      — per-bundle molecule status + atoms (`CreateMolecule`)
+//!   * `wallet-status`  — per-bundle/token admission + balance (`WalletStatus`)
+//!   * `active-user`    — active-session changes for a meta pair (`ActiveUser`)
+//!   * `active-wallet`  — wallet changes for a bundle (`ActiveWallet`)
 //!
-//! These are the validator's only subscriptions. (Molecule/wallet change
-//! feeds previously planned over Supabase Realtime were removed in the
-//! 2026-05-29 Supabase scrub; if reintroduced, build them over Postgres
-//! LISTEN/NOTIFY and they'll surface here the same way.)
+//! All six are in-process broadcast channels on the validator, so they work in
+//! every deployment. Delivery is cell-gated server-side (SEC-010 P4-sub).
+//!
+//! ⚠️ Selection sets MUST use the GraphQL **wire** names, which can differ from
+//! the validator's Rust field names via `#[graphql(name = …)]` — e.g. `DagChange`
+//! exposes `bundleHash`, not `bundle`. Getting this wrong makes the server reject
+//! the whole document and the subscription yields nothing (CLI-5, fixed in 0.2.2).
+//! The `schema_contract` tests at the bottom of this file now validate every
+//! query below against the validator's SDL (vendored at
+//! `tests/validator-schema.graphql`), so that class of bug fails the build
+//! instead of shipping.
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -29,12 +39,30 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use crate::config::Config;
 use crate::output;
 
+/// One watchable subscription: the CLI subject name, the GraphQL root field, and
+/// the document sent on the wire.
+pub(crate) struct SubscriptionSpec {
+    pub subject: &'static str,
+    pub root: &'static str,
+    pub query: &'static str,
+}
 
-// Subscription query strings. Field lists mirror
-// `src/graphql/subscriptions.rs` struct members at the time of writing;
-// all fields are asked for so the streamed JSON is self-describing.
-// Field names use the GraphQL camelCase wire form (per `#[graphql(name
-// = "metaType")]` attrs on the server).
+/// Every subscription the CLI can watch — the single source of truth for both
+/// dispatch and the `schema_contract` tests. Adding an entry here automatically
+/// puts its selection set under contract test, so a wire-name mismatch (CLI-5)
+/// cannot reach a release via an unregistered query.
+pub(crate) const SUBSCRIPTIONS: &[SubscriptionSpec] = &[
+    SubscriptionSpec { subject: "embeddings", root: "embeddingChanges", query: EMBEDDINGS_QUERY },
+    SubscriptionSpec { subject: "dag", root: "dagChanges", query: DAG_QUERY },
+    SubscriptionSpec { subject: "molecules", root: "CreateMolecule", query: MOLECULES_QUERY },
+    SubscriptionSpec { subject: "wallet-status", root: "WalletStatus", query: WALLET_STATUS_QUERY },
+    SubscriptionSpec { subject: "active-user", root: "ActiveUser", query: ACTIVE_USER_QUERY },
+    SubscriptionSpec { subject: "active-wallet", root: "ActiveWallet", query: ACTIVE_WALLET_QUERY },
+];
+
+// Subscription query strings. Field names use the GraphQL camelCase wire form
+// (per the `#[graphql(name = …)]` attrs on the server); all fields are asked for
+// so the streamed JSON is self-describing.
 const EMBEDDINGS_QUERY: &str = r#"
 subscription Watch($metaType: String, $metaId: String) {
   embeddingChanges(metaType: $metaType, metaId: $metaId) {
@@ -49,7 +77,7 @@ subscription Watch($metaType: String, $metaId: String) {
 }
 "#;
 
-const DAG_QUERY: &str = r#"
+pub(crate) const DAG_QUERY: &str = r#"
 subscription Watch($cellSlug: String) {
   dagChanges(cellSlug: $cellSlug) {
     eventType
@@ -93,6 +121,63 @@ subscription Watch($bundle: String!) {
 }
 "#;
 
+// WalletStatus (SEC-010 P4-sub): per-bundle/token admission + balance changes.
+const WALLET_STATUS_QUERY: &str = r#"
+subscription Watch($bundle: String!, $token: String!) {
+  WalletStatus(bundle: $bundle, token: $token) {
+    bundle
+    token
+    admission
+    balance
+  }
+}
+"#;
+
+// ActiveUser: active-session changes for a metaType/metaId pair.
+const ACTIVE_USER_QUERY: &str = r#"
+subscription Watch($metaType: String!, $metaId: String!) {
+  ActiveUser(metaType: $metaType, metaId: $metaId) {
+    bundleHash
+    metaType
+    metaId
+    cellSlug
+    jsonData
+    lastActive
+    createdAt
+    updatedAt
+  }
+}
+"#;
+
+// ActiveWallet: wallet changes for a bundle. Returns the full `Wallet` type;
+// we select scalars plus shallow nesting and deliberately OMIT `metas` /
+// `tokenUnits` / `tradeRates` so each streamed line stays jq-friendly.
+const ACTIVE_WALLET_QUERY: &str = r#"
+subscription Watch($bundle: String!) {
+  ActiveWallet(bundle: $bundle) {
+    address
+    position
+    isShadow
+    bundleHash
+    tokenSlug
+    balance
+    batchId
+    amount
+    type
+    createdAt
+    updatedAt
+    token {
+      slug
+      name
+      fungibility
+    }
+    walletBundle {
+      bundleHash
+    }
+  }
+}
+"#;
+
 /// Public entry: `knishio watch embeddings`.
 pub async fn embeddings(
     cfg: &Config,
@@ -120,6 +205,32 @@ pub async fn molecules(cfg: &Config, bundle: String) -> Result<()> {
         "bundle": bundle,
     });
     run_subscription(cfg, MOLECULES_QUERY, variables, "CreateMolecule").await
+}
+
+/// Public entry: `knishio watch wallet-status --bundle <hash> --token <slug>`.
+pub async fn wallet_status(cfg: &Config, bundle: String, token: String) -> Result<()> {
+    let variables = json!({
+        "bundle": bundle,
+        "token": token,
+    });
+    run_subscription(cfg, WALLET_STATUS_QUERY, variables, "WalletStatus").await
+}
+
+/// Public entry: `knishio watch active-user --meta-type <t> --meta-id <i>`.
+pub async fn active_user(cfg: &Config, meta_type: String, meta_id: String) -> Result<()> {
+    let variables = json!({
+        "metaType": meta_type,
+        "metaId": meta_id,
+    });
+    run_subscription(cfg, ACTIVE_USER_QUERY, variables, "ActiveUser").await
+}
+
+/// Public entry: `knishio watch active-wallet --bundle <hash>`.
+pub async fn active_wallet(cfg: &Config, bundle: String) -> Result<()> {
+    let variables = json!({
+        "bundle": bundle,
+    });
+    run_subscription(cfg, ACTIVE_WALLET_QUERY, variables, "ActiveWallet").await
 }
 
 // ── Subscription driver ─────────────────────────────────────────────
@@ -244,58 +355,26 @@ enum Flow {
 
 /// Turn one incoming WS message into a stdout JSON line, or a no-op
 /// for protocol control frames.
+///
+/// Classification itself lives in `crate::ws::classify` — shared with `verify`'s
+/// subscription probe so the two can't drift. This function adds only the
+/// operator-facing output and the streaming loop's control flow.
 fn handle_message(msg: Message, root_field: &str) -> Result<Flow> {
-    let v = match msg {
-        Message::Text(t) => serde_json::from_str::<Value>(&t).context("json parse")?,
-        Message::Binary(_) => return Ok(Flow::Continue), // GraphQL-WS uses text frames
-        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return Ok(Flow::Continue),
-        Message::Close(_) => {
-            output::warn("Server sent close frame.");
-            return Ok(Flow::Ended { reason: None });
+    Ok(match crate::ws::classify(&msg, root_field)? {
+        crate::ws::ServerMsg::Event(event) => {
+            // JSON-per-line on stdout — jq/tool-friendly.
+            println!("{}", serde_json::to_string(&event).unwrap_or_default());
+            Flow::Streamed
         }
-    };
-
-    Ok(match v.get("type").and_then(|t| t.as_str()) {
-        Some("next") => {
-            // payload.data.<root_field> — our streamable event.
-            if let Some(event) = v
-                .pointer("/payload/data")
-                .and_then(|d| d.get(root_field))
-            {
-                // JSON-per-line on stdout — jq/tool-friendly.
-                println!("{}", serde_json::to_string(event).unwrap_or_default());
-                Flow::Streamed
-            } else if let Some(errors) = v.pointer("/payload/errors") {
-                // async-graphql delivers query-validation failures here, then
-                // `complete` — fatal for this subscription.
-                output::error(&format!("server error: {}", errors));
-                Flow::Ended {
-                    reason: Some(errors.to_string()),
-                }
-            } else {
-                Flow::Continue
-            }
+        crate::ws::ServerMsg::Rejected(reason) => {
+            output::error(&format!("server error: {}", reason));
+            Flow::Ended { reason: Some(reason) }
         }
-        Some("error") => {
-            let payload = v.get("payload").map(|p| p.to_string()).unwrap_or_default();
-            output::error(&format!("subscription error: {}", payload));
-            Flow::Ended {
-                reason: Some(payload),
-            }
-        }
-        Some("complete") => {
+        crate::ws::ServerMsg::Completed => {
             output::info("Server signalled subscription complete.");
             Flow::Ended { reason: None }
         }
-        Some("ping") => {
-            // graphql-transport-ws keepalive — no response required
-            // (server usually just sends periodically).
-            Flow::Continue
-        }
-        _ => {
-            // Unknown message type — ignore, don't clutter output.
-            Flow::Continue
-        }
+        crate::ws::ServerMsg::Noise => Flow::Continue,
     })
 }
 
@@ -362,5 +441,265 @@ mod tests {
             handle_message(text(r#"{"type":"error","payload":[{"message":"boom"}]}"#), "dagChanges").unwrap(),
             Flow::Ended { reason: Some(_) }
         ));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Schema contract: every subscription query vs the validator SDL
+// ═══════════════════════════════════════════════════════════════
+//
+// This is the build-time net for the CLI-5 bug class. A selection set that names
+// a field the server doesn't expose (e.g. `bundle` where the wire name is
+// `bundleHash`) makes the server reject the entire document, so the subscription
+// silently yields nothing. Validating against the SDL catches it because the SDL
+// *is* the wire contract — `#[graphql(name = …)]` renames are already applied.
+
+#[cfg(test)]
+mod schema_contract {
+    use super::{SubscriptionSpec, SUBSCRIPTIONS};
+    use std::collections::HashMap;
+
+    /// One node of a parsed GraphQL selection set.
+    #[derive(Debug)]
+    struct Sel {
+        name: String,
+        children: Vec<Sel>,
+    }
+
+    /// Remove `"""…"""` doc blocks — they may contain braces and prose that
+    /// would otherwise parse as fields.
+    fn strip_docs(src: &str) -> String {
+        let mut s = String::new();
+        let mut rest = src;
+        while let Some(i) = rest.find("\"\"\"") {
+            s.push_str(&rest[..i]);
+            rest = &rest[i + 3..];
+            match rest.find("\"\"\"") {
+                Some(j) => rest = &rest[j + 3..],
+                None => { rest = ""; break; }
+            }
+        }
+        s.push_str(rest);
+        s
+    }
+
+    /// Remove `(…)` groups, depth-aware. Load-bearing on BOTH sides: query
+    /// arguments (`dagChanges(cellSlug: $x)`) and SDL field arguments
+    /// (`dagChanges(cellSlug: String): DagChange!` — whose first colon is INSIDE
+    /// the parens, so splitting on it without this yields the argument's type).
+    fn strip_parens(src: &str) -> String {
+        let mut out = String::new();
+        let mut depth = 0usize;
+        for c in src.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Strip doc blocks and argument groups, then tokenize into identifiers and braces.
+    fn tokenize(src: &str) -> Vec<String> {
+        let out = strip_parens(&strip_docs(src));
+        out.replace('{', " { ")
+            .replace('}', " } ")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Parse a subscription document into (root field name, its selection set).
+    fn parse_query(query: &str) -> (String, Vec<Sel>) {
+        let toks = tokenize(query);
+        // Skip the operation header up to its opening brace.
+        let body = toks.iter().position(|t| t == "{").expect("query has a body");
+        let mut i = body + 1;
+        let root = toks[i].clone();
+        i += 1;
+        assert_eq!(toks[i], "{", "root field must have a selection set");
+        i += 1;
+        let (sels, _) = parse_sels(&toks, i);
+        (root, sels)
+    }
+
+    /// Parse selections until the matching close brace; returns (selections, index-after).
+    fn parse_sels(toks: &[String], mut i: usize) -> (Vec<Sel>, usize) {
+        let mut out = Vec::new();
+        while i < toks.len() {
+            match toks[i].as_str() {
+                "}" => return (out, i + 1),
+                "{" => panic!("unexpected brace at token {i}"),
+                name => {
+                    let name = name.to_string();
+                    i += 1;
+                    if i < toks.len() && toks[i] == "{" {
+                        let (children, next) = parse_sels(toks, i + 1);
+                        out.push(Sel { name, children });
+                        i = next;
+                    } else {
+                        out.push(Sel { name, children: Vec::new() });
+                    }
+                }
+            }
+        }
+        (out, i)
+    }
+
+    /// SDL `type NAME { … }` blocks → field name → bare type name.
+    fn sdl_types(sdl: &str) -> HashMap<String, HashMap<String, String>> {
+        // Drop doc blocks first so their prose can't look like fields.
+        let docs_free = strip_docs(sdl);
+
+        let mut types = HashMap::new();
+        let mut cur: Option<(String, HashMap<String, String>)> = None;
+        for line in docs_free.lines() {
+            // Strip argument groups so `f(a: X): Y` splits on the RIGHT colon.
+            let stripped = strip_parens(line);
+            let t = stripped.trim();
+            if let Some(rest) = t.strip_prefix("type ") {
+                let name = rest.split_whitespace().next().unwrap_or("").to_string();
+                cur = Some((name, HashMap::new()));
+                continue;
+            }
+            if t == "}" {
+                if let Some((n, f)) = cur.take() {
+                    types.insert(n, f);
+                }
+                continue;
+            }
+            if let Some((name, fields)) = cur.as_mut() {
+                let _ = name;
+                // `field: Type`, `field(args…): Type`
+                if let Some((lhs, rhs)) = t.split_once(':') {
+                    let fname = lhs.split('(').next().unwrap_or("").trim();
+                    if !fname.is_empty() && fname.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        let ftype = rhs
+                            .trim()
+                            .trim_start_matches('[')
+                            .split(|c: char| c == '!' || c == ']' || c == ' ')
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        fields.insert(fname.to_string(), ftype);
+                    }
+                }
+            }
+        }
+        types
+    }
+
+    fn vendored_sdl() -> String {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/validator-schema.graphql");
+        std::fs::read_to_string(&p)
+            .unwrap_or_else(|e| panic!("vendored SDL missing at {}: {e}", p.display()))
+    }
+
+    /// Recursively assert every selected field exists on `type_name`.
+    fn check(
+        types: &HashMap<String, HashMap<String, String>>,
+        type_name: &str,
+        sels: &[Sel],
+        path: &str,
+        errs: &mut Vec<String>,
+    ) {
+        let Some(fields) = types.get(type_name) else {
+            errs.push(format!("{path}: SDL has no type `{type_name}`"));
+            return;
+        };
+        for s in sels {
+            match fields.get(&s.name) {
+                None => errs.push(format!(
+                    "{path}.{}: field not on type `{type_name}` — wire-name mismatch? \
+                     (available: {})",
+                    s.name,
+                    {
+                        let mut v: Vec<&str> = fields.keys().map(String::as_str).collect();
+                        v.sort();
+                        v.join(", ")
+                    }
+                )),
+                Some(child_type) if !s.children.is_empty() => check(
+                    types,
+                    child_type,
+                    &s.children,
+                    &format!("{path}.{}", s.name),
+                    errs,
+                ),
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// THE CLI-5 GUARD: every registered subscription's selection set must match
+    /// the validator's SDL exactly, including nested selections.
+    #[test]
+    fn every_subscription_query_matches_validator_sdl() {
+        let sdl = vendored_sdl();
+        let types = sdl_types(&sdl);
+        let sub_root = types
+            .get("SubscriptionRoot")
+            .expect("SDL defines SubscriptionRoot");
+
+        let mut errs = Vec::new();
+        for SubscriptionSpec { subject, root, query } in SUBSCRIPTIONS {
+            let (parsed_root, sels) = parse_query(query);
+            if &parsed_root != root {
+                errs.push(format!(
+                    "{subject}: registry says root `{root}` but the query selects `{parsed_root}`"
+                ));
+                continue;
+            }
+            match sub_root.get(*root) {
+                None => errs.push(format!(
+                    "{subject}: `{root}` is not a field of SubscriptionRoot"
+                )),
+                Some(ret) => check(&types, ret, &sels, subject, &mut errs),
+            }
+        }
+        assert!(errs.is_empty(), "schema contract violations:\n  - {}", errs.join("\n  - "));
+    }
+
+    /// Sanity: the registry covers every subscription the validator exposes, so a
+    /// newly added server subscription surfaces here instead of going unnoticed.
+    #[test]
+    fn registry_covers_every_validator_subscription() {
+        let sdl = vendored_sdl();
+        let types = sdl_types(&sdl);
+        let sub_root = types.get("SubscriptionRoot").expect("SubscriptionRoot");
+        let registered: Vec<&str> = SUBSCRIPTIONS.iter().map(|s| s.root).collect();
+        let missing: Vec<&String> = sub_root
+            .keys()
+            .filter(|k| !registered.contains(&k.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "validator exposes subscriptions the CLI cannot watch: {missing:?} \
+             (add them to SUBSCRIPTIONS + WatchSubject, or document the gap)"
+        );
+    }
+
+    /// Monorepo-only: the vendored SDL must not drift from the validator's
+    /// committed baseline. Skips cleanly outside the monorepo (e.g. crates.io CI
+    /// checkouts), where the contract test above still runs against the vendor.
+    #[test]
+    fn vendored_sdl_matches_validator_repo() {
+        let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../servers/knishio-validator-rust/tests/schema.graphql");
+        if !sibling.exists() {
+            eprintln!("skipping drift check: not in the monorepo ({})", sibling.display());
+            return;
+        }
+        let theirs = std::fs::read_to_string(&sibling).expect("read validator SDL");
+        assert_eq!(
+            vendored_sdl(),
+            theirs,
+            "tests/validator-schema.graphql has drifted from the validator's \
+             committed SDL — re-copy it: cp {} tests/validator-schema.graphql",
+            sibling.display()
+        );
     }
 }
