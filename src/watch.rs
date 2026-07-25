@@ -178,6 +178,24 @@ subscription Watch($bundle: String!) {
 }
 "#;
 
+/// The registry entry for `subject`.
+///
+/// This is what makes `SUBSCRIPTIONS` load-bearing rather than a table that only
+/// the tests read. Before this, each entry point passed its own `root` literal to
+/// `run_subscription` while the contract tests checked the registry's copy — so
+/// the tests validated one copy of the (query, root) pair and the wire carried
+/// another. That is exactly the CLI-5 shape (a check that passes while the thing
+/// it is checking is broken), so dispatch now reads the same row the tests do.
+///
+/// Panics only on a subject with no registry row, which the
+/// `every_entry_point_has_a_registry_row` test makes unreachable.
+fn spec(subject: &str) -> &'static SubscriptionSpec {
+    SUBSCRIPTIONS
+        .iter()
+        .find(|s| s.subject == subject)
+        .expect("every watch entry point must have a SUBSCRIPTIONS row")
+}
+
 /// Public entry: `knishio watch embeddings`.
 pub async fn embeddings(
     cfg: &Config,
@@ -188,7 +206,8 @@ pub async fn embeddings(
         "metaType": meta_type,
         "metaId": meta_id,
     });
-    run_subscription(cfg, EMBEDDINGS_QUERY, variables, "embeddingChanges").await
+    let spec = spec("embeddings");
+    run_subscription(cfg, spec.query, variables, spec.root).await
 }
 
 /// Public entry: `knishio watch dag`.
@@ -196,7 +215,8 @@ pub async fn dag(cfg: &Config, cell_slug: Option<String>) -> Result<()> {
     let variables = json!({
         "cellSlug": cell_slug,
     });
-    run_subscription(cfg, DAG_QUERY, variables, "dagChanges").await
+    let spec = spec("dag");
+    run_subscription(cfg, spec.query, variables, spec.root).await
 }
 
 /// Public entry: `knishio watch molecules --bundle <hash>`.
@@ -204,7 +224,8 @@ pub async fn molecules(cfg: &Config, bundle: String) -> Result<()> {
     let variables = json!({
         "bundle": bundle,
     });
-    run_subscription(cfg, MOLECULES_QUERY, variables, "CreateMolecule").await
+    let spec = spec("molecules");
+    run_subscription(cfg, spec.query, variables, spec.root).await
 }
 
 /// Public entry: `knishio watch wallet-status --bundle <hash> --token <slug>`.
@@ -213,7 +234,8 @@ pub async fn wallet_status(cfg: &Config, bundle: String, token: String) -> Resul
         "bundle": bundle,
         "token": token,
     });
-    run_subscription(cfg, WALLET_STATUS_QUERY, variables, "WalletStatus").await
+    let spec = spec("wallet-status");
+    run_subscription(cfg, spec.query, variables, spec.root).await
 }
 
 /// Public entry: `knishio watch active-user --meta-type <t> --meta-id <i>`.
@@ -222,7 +244,8 @@ pub async fn active_user(cfg: &Config, meta_type: String, meta_id: String) -> Re
         "metaType": meta_type,
         "metaId": meta_id,
     });
-    run_subscription(cfg, ACTIVE_USER_QUERY, variables, "ActiveUser").await
+    let spec = spec("active-user");
+    run_subscription(cfg, spec.query, variables, spec.root).await
 }
 
 /// Public entry: `knishio watch active-wallet --bundle <hash>`.
@@ -230,7 +253,8 @@ pub async fn active_wallet(cfg: &Config, bundle: String) -> Result<()> {
     let variables = json!({
         "bundle": bundle,
     });
-    run_subscription(cfg, ACTIVE_WALLET_QUERY, variables, "ActiveWallet").await
+    let spec = spec("active-wallet");
+    run_subscription(cfg, spec.query, variables, spec.root).await
 }
 
 // ── Subscription driver ─────────────────────────────────────────────
@@ -456,7 +480,7 @@ mod tests {
 
 #[cfg(test)]
 mod schema_contract {
-    use super::{SubscriptionSpec, SUBSCRIPTIONS};
+    use super::{spec, SubscriptionSpec, SUBSCRIPTIONS};
     use std::collections::HashMap;
 
     /// One node of a parsed GraphQL selection set.
@@ -680,6 +704,32 @@ mod schema_contract {
             "validator exposes subscriptions the CLI cannot watch: {missing:?} \
              (add them to SUBSCRIPTIONS + WatchSubject, or document the gap)"
         );
+    }
+
+    /// Every `watch` entry point must resolve a registry row, which is what makes
+    /// `spec()`'s `expect` unreachable in a release binary. The subjects here are
+    /// the CLI's `WatchSubject` values, so a renamed subject that misses the
+    /// registry fails here instead of panicking in a user's terminal.
+    #[test]
+    fn every_entry_point_has_a_registry_row() {
+        for subject in [
+            "embeddings",
+            "dag",
+            "molecules",
+            "wallet-status",
+            "active-user",
+            "active-wallet",
+        ] {
+            let s = spec(subject);
+            assert_eq!(s.subject, subject);
+            // A row whose root field isn't selected by its own query would send a
+            // document whose payload the driver then can't find.
+            assert!(
+                s.query.contains(s.root),
+                "{subject}: query does not select its root field {}",
+                s.root
+            );
+        }
     }
 
     /// Monorepo-only: the vendored SDL must not drift from the validator's

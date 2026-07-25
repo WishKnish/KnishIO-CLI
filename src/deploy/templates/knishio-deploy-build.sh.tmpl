@@ -6,4 +6,19 @@ set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$HOME/.cargo-target/knishio-validator"
 cargo build --release --locked
+# Pre-deploy gate. Forge quick-deploy means every push lands here automatically,
+# so this is the last chance to stop a build that fails the repo's own gates
+# (patent traceability, no-unwrap, GraphQL SDL + OpenAPI drift, protocol
+# invariants, offline tests). `set -e` makes a failure abort BEFORE upgrade.sh —
+# no pg_dump, no binary swap, no restart, production keeps the running binary.
+#
+# Guarded with `make -n` so this script stays valid against validator revisions
+# that predate the target (it is skipped, with a notice, rather than failing).
+# The gate is DB-free by construction: this box's Postgres is production, and
+# `#[sqlx::test]` creates and drops databases. DB suites run in CI instead.
+if make -n deploy-gate >/dev/null 2>&1; then
+  make deploy-gate
+else
+  echo "NOTE: this validator revision has no 'make deploy-gate' target — skipping gate"
+fi
 sudo /usr/local/bin/upgrade.sh "$CARGO_TARGET_DIR/release/knishio-validator"

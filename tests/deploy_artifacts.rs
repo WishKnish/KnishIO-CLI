@@ -156,6 +156,23 @@ fn forge_pair_invariants() {
     assert!(b.contains("CARGO_TARGET_DIR"));
     assert!(b.contains("/usr/local/bin/upgrade.sh"));
     assert!(b.contains("knishio-Cargo.lock.pinned"), "F-12 interim line expected without --lock-committed");
+
+    // The pre-deploy gate must run BEFORE the binary swap. That ordering IS the
+    // safety property: with `set -e`, a failed gate aborts before pg_dump, before
+    // the swap and before the restart, so production keeps the running binary.
+    // A gate placed after upgrade.sh would report failures on an already-deployed
+    // build — worse than no gate, because it reads as protection.
+    let gate = b
+        .find("make deploy-gate")
+        .expect("build script must invoke the validator's pre-deploy gate");
+    let swap = b.find("/usr/local/bin/upgrade.sh").unwrap();
+    assert!(gate < swap, "deploy-gate must precede upgrade.sh, not follow it");
+    // Guarded with `make -n` so validator revisions predating the target skip the
+    // gate with a notice instead of failing every deploy.
+    assert!(
+        b.contains("make -n deploy-gate"),
+        "gate call must be guarded for older validator revisions"
+    );
 }
 
 /// Remote targets must never infer accel from local hardware: the deploy /

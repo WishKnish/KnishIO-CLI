@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.4
+
+Single-purpose release: the generated Forge CD script now gates the deploy on the
+validator's own test suite.
+
+- **`deploy forge` runs `make deploy-gate` before the binary swap.** The generated
+  build script previously gated only on `cargo build --release --locked`, so a
+  commit that compiled but failed the validator's gates (patent traceability,
+  no-unwrap, GraphQL SDL / OpenAPI drift, protocol invariants, offline tests) still
+  reached production — and with Forge quick-deploy enabled, *every push* takes that
+  path automatically. `set -euo pipefail` makes a failing gate abort **before**
+  `upgrade.sh`, so there is no pg_dump, no swap and no restart: production keeps
+  the running binary. The call is guarded by `make -n deploy-gate`, so validator
+  revisions that predate the target skip it with a notice instead of failing every
+  deploy. A new assertion checks the gate is emitted **before** `upgrade.sh` — a
+  gate placed after the swap would report failures on an already-deployed build,
+  which is worse than no gate because it reads as protection. Verified by breaking
+  a gate in a scratch release directory and confirming the script exits non-zero
+  with the installed binary and service start time untouched.
+
 ## 0.2.3
 
 Closes the CLI-5 bug class with two independent nets, and completes `watch`
