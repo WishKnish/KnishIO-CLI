@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.5
+
+Single-purpose release: the generated Forge CD script disables incremental
+compilation, which on a deploy box is pure write-only waste.
+
+- **`deploy forge` exports `CARGO_INCREMENTAL=0`.** Incremental caches are keyed to
+  the source directory, and Forge compiles every deploy in a fresh
+  `releases/<id>` path — so each session dir is written once and never read again.
+  Measured on testnet: **43 session dirs, 4.6 GB, after only two gated deploys**,
+  growing with every push. The gate's speed comes from the dependency artifacts in
+  `$CARGO_TARGET_DIR/debug/deps`, which are path-independent and untouched by this,
+  so disabling incremental costs nothing here. A new assertion requires the export
+  and requires it to appear **before** the build it applies to.
+
 ## 0.2.4
 
 Single-purpose release: the generated Forge CD script now gates the deploy on the

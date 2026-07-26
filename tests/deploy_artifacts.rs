@@ -154,6 +154,17 @@ fn forge_pair_invariants() {
     let b = std::fs::read_to_string(&build).unwrap();
     assert!(b.contains("cargo build --release --locked"));
     assert!(b.contains("CARGO_TARGET_DIR"));
+    // Incremental caches are keyed to the source dir, and every Forge deploy compiles a
+    // fresh releases/<id> path — so they are written once, never read, and grew to 4.6 GB
+    // in two deploys. Must be off, and must be exported BEFORE the build that would
+    // otherwise write them.
+    let incr = b
+        .find("CARGO_INCREMENTAL=0")
+        .expect("build script must disable incremental compilation (write-only on a CD box)");
+    assert!(
+        incr < b.find("cargo build --release").unwrap(),
+        "CARGO_INCREMENTAL=0 must be exported before the build it applies to"
+    );
     assert!(b.contains("/usr/local/bin/upgrade.sh"));
     assert!(b.contains("knishio-Cargo.lock.pinned"), "F-12 interim line expected without --lock-committed");
 

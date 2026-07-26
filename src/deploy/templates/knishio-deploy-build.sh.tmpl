@@ -5,6 +5,13 @@ set -euo pipefail
 {{LOCK_RESTORE_LINE}}
 export PATH="$HOME/.cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$HOME/.cargo-target/knishio-validator"
+# Incremental compilation is write-only waste here. Its caches are keyed to the
+# source directory, and Forge compiles every deploy in a fresh releases/<id> path,
+# so each session dir is written once and never read again: 43 of them (4.6 GB) had
+# piled up after just two gated deploys. The gate's own speed comes from the
+# dependency artifacts in $CARGO_TARGET_DIR/debug/deps, which are path-independent
+# and unaffected by this.
+export CARGO_INCREMENTAL=0
 cargo build --release --locked
 # Pre-deploy gate. Forge quick-deploy means every push lands here automatically,
 # so this is the last chance to stop a build that fails the repo's own gates
