@@ -121,12 +121,34 @@ pub async fn env(out_dir: &Path, behind_proxy: bool, cors: &str, port: u16) -> R
 
 // ── bootstrap: runbook §1–§7 as one idempotent root script ──────────
 
+/// Build the optional `Environment=` lines for `knishio-health.service`.
+///
+/// Both are opt-in: with neither set the unit is byte-identical to before, so the monitor
+/// keeps its current behavior (detect, log, page nobody) rather than silently changing.
+///
+/// `PING_URL` is a dead-man's-switch check-in, curled only on a SUCCESSFUL probe. It exists
+/// because nothing running ON the host can report that the host died — an external service
+/// noticing that check-ins stopped is the only way to learn that.
+fn health_alert_env(alert_cmd: Option<&str>, ping_url: Option<&str>) -> String {
+    let mut s = String::new();
+    if let Some(cmd) = alert_cmd.filter(|c| !c.trim().is_empty()) {
+        s.push_str(&format!("Environment=ALERT_CMD={cmd}\n"));
+    }
+    if let Some(url) = ping_url.filter(|u| !u.trim().is_empty()) {
+        s.push_str(&format!("Environment=PING_URL={url}\n"));
+    }
+    s
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn bootstrap(
     out_dir: &Path,
     deploy_user: &str,
     behind_proxy: bool,
     cors: &str,
     port: u16,
+    alert_cmd: Option<&str>,
+    ping_url: Option<&str>,
 ) -> Result<()> {
     let env_body = env_content(&EnvOpts { behind_proxy, cors, port })?;
     // The env body nests inside the bootstrap heredoc; its __KNISHIO_DB_PASS__
@@ -140,6 +162,7 @@ pub async fn bootstrap(
             ("SERVER_PORT", &port.to_string()),
             ("ENV_CONTENT", env_body.trim_end()),
             ("SUDOERS_CONTENT", sudoers_content(deploy_user).trim_end()),
+            ("HEALTH_ALERT_ENV", &health_alert_env(alert_cmd, ping_url)),
         ],
     )?;
     write_artifact(out_dir, "knishio-bootstrap.sh", &script, true)?;
@@ -283,6 +306,8 @@ mod tests {
                 ("SERVER_PORT", "8080"),
                 ("ENV_CONTENT", env_body.trim_end()),
                 ("SUDOERS_CONTENT", sudoers_content("forge").trim_end()),
+                // Empty = no alerting configured, the default shape.
+                ("HEALTH_ALERT_ENV", ""),
             ],
         )
         .unwrap();

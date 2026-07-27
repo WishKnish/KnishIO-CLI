@@ -70,6 +70,15 @@ install -m 644 -o root -g root knishio-validator.service /etc/systemd/system/
 install -d -m 700 -o knishio -g knishio /var/lib/knishio
 install -d -m 750 -o knishio -g knishio /etc/knishio
 install -m 755 -o root -g root upgrade.sh health-monitor.sh /usr/local/bin/
+# Guarded: tarballs built before the disk-prune work (F-20) do not carry this script, and a
+# bare `install` of a missing file would abort the whole bootstrap under `set -e`. Same
+# reasoning as the `make -n deploy-gate` guard in the CD build script — the generator and the
+# validator revision being installed can legitimately differ in age.
+if [ -f cargo-target-prune.sh ]; then
+  install -m 755 -o root -g root cargo-target-prune.sh /usr/local/bin/
+else
+  echo "NOTE: this tarball has no cargo-target-prune.sh — skipping the disk-prune timer"
+fi
 # F-1 gate: DIRECTIVE-ONLY check (comments mentioning docker are fine)
 grep -qE '^(Requires|After)=.*docker\.service' /etc/systemd/system/knishio-validator.service \
   && { echo "FATAL: unit still hard-couples docker.service"; exit 1; } || true
@@ -113,7 +122,10 @@ Description=KnishIO readiness probe (one-shot)
 [Service]
 Type=oneshot
 Environment=URL=http://127.0.0.1:{{SERVER_PORT}}/readyz
-ExecStart=/usr/local/bin/health-monitor.sh --once
+# STATE_DIR holds the consecutive-failure count. Each timer firing is a fresh process, so
+# without a persisted count FAIL_THRESHOLD cannot apply and every single blip alerts.
+Environment=STATE_DIR=/var/lib/knishio
+{{HEALTH_ALERT_ENV}}ExecStart=/usr/local/bin/health-monitor.sh --once
 EOF
 cat > /etc/systemd/system/knishio-health.timer <<'EOF'
 [Unit]
@@ -140,11 +152,39 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+# Bounded CD disk usage (F-20). `make deploy-gate` compiles the test targets, and Forge builds
+# each release in a fresh path, so the crate's artifacts are re-emitted under a new metadata
+# hash every deploy (~1-2 GB) and cargo never collects the old ones. The script wipes the DEV
+# profile only when free space is actually low; the release profile (holding the binary
+# upgrade.sh installs) is never touched. Runs as the deploy user, who owns the target dir.
+if [ -x /usr/local/bin/cargo-target-prune.sh ]; then
+cat > /etc/systemd/system/knishio-cargo-prune.service <<'EOF'
+[Unit]
+Description=Prune the CD cargo dev-profile target dir when free space is low
+[Service]
+Type=oneshot
+User={{DEPLOY_USER}}
+Environment=CARGO_TARGET_DIR=/home/{{DEPLOY_USER}}/.cargo-target/knishio-validator
+Environment=MIN_FREE_GB=30
+ExecStart=/usr/local/bin/cargo-target-prune.sh
+EOF
+cat > /etc/systemd/system/knishio-cargo-prune.timer <<'EOF'
+[Unit]
+Description=Weekly conditional prune of the CD cargo target dir
+[Timer]
+OnCalendar=weekly
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+fi
 
 echo "== Runbook §7: start & verify (F-3: compare applied==expected FROM THE ENDPOINT — never hardcode the count) =="
 systemctl daemon-reload
 systemctl enable --now knishio-validator
 systemctl enable --now knishio-health.timer knishio-backup-prune.timer
+# Only if the unit was written above (older tarballs ship no prune script).
+[ -f /etc/systemd/system/knishio-cargo-prune.timer ] && systemctl enable --now knishio-cargo-prune.timer || true
 READY=0
 for i in $(seq 1 40); do
   curl -fsS "http://127.0.0.1:{{SERVER_PORT}}/readyz" >/dev/null 2>&1 && { READY=1; break; }

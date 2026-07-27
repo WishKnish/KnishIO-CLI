@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.6
+
+Day-2 ops release: alerting that can actually reach a human, and bounded CD disk
+usage. Pairs with validator-side changes to `deploy/health-monitor.sh` and a new
+`deploy/cargo-target-prune.sh`.
+
+### New
+
+- **`deploy bootstrap --alert-cmd` / `--ping-url`** wire the readiness monitor to a
+  real channel. Both are opt-in: with neither flag the generated unit is unchanged,
+  so nothing silently starts paging. `--alert-cmd` runs on sustained failure;
+  `--ping-url` is a **dead-man's-switch check-in** curled on every *successful*
+  probe (Sentry Crons / Healthchecks.io style). The check-in exists because nothing
+  running **on** the host can report that the host died — an external service
+  noticing check-ins stopped is the only way to learn that. It also covers the edge
+  blind spot: the monitor probes `127.0.0.1`, so an nginx/TLS/certificate failure
+  takes the public site down while the local probe still reports healthy.
+- **`Environment=STATE_DIR=/var/lib/knishio`** on `knishio-health.service`, which is
+  what makes `FAIL_THRESHOLD` mean anything in the `--once` mode the timer actually
+  uses. Each firing is a fresh process, so the consecutive-failure count has to be
+  persisted; without it every single transient blip alerted. Asserted to be created
+  before the probe timer starts.
+- **`knishio-cargo-prune` unit + weekly timer** (mirroring `knishio-backup-prune`).
+  `make deploy-gate` compiles the test targets, and Forge builds each release in a
+  fresh path, so the crate's artifacts are re-emitted under a new metadata hash every
+  deploy (~1–2 GB) and cargo never collects the old ones. The prune wipes the **dev**
+  profile only when free space is genuinely low; the release profile holding the
+  installed binary is never touched.
+
+### Internal
+
+- Both the prune-script install and its unit are **guarded** on the file existing:
+  tarballs built before this work do not ship `cargo-target-prune.sh`, and an
+  unguarded `install` of a missing file would abort the whole bootstrap under
+  `set -e`. Same reasoning as the `make -n deploy-gate` guard — the generator and the
+  validator revision being installed can legitimately differ in age.
+- New assertions cover STATE_DIR, its ordering before the timer, both guards, and
+  that the alert/ping `Environment=` lines land inside the health unit *before* its
+  `ExecStart`. All three were confirmed to fail when their generated line is removed
+  or moved.
+
 ## 0.2.5
 
 Single-purpose release: the generated Forge CD script disables incremental

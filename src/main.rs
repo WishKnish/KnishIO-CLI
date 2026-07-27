@@ -527,6 +527,17 @@ enum DeployCommands {
         /// Validator port.
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Command run when the readiness probe fails FAIL_THRESHOLD times in a row;
+        /// receives the message as $1 (a pager, webhook poster, etc.). Without it the
+        /// monitor detects outages and notifies nobody.
+        #[arg(long)]
+        alert_cmd: Option<String>,
+        /// Dead-man's-switch check-in URL, curled on every SUCCESSFUL probe (e.g. a Sentry
+        /// Crons or Healthchecks.io URL). The external service alerts when check-ins STOP —
+        /// the only way to learn that the host itself died, which no on-host check can
+        /// report. Also covers the edge (nginx/TLS) blind spot of probing 127.0.0.1.
+        #[arg(long)]
+        ping_url: Option<String>,
         /// Output directory for generated artifacts.
         #[arg(long, default_value = "deploy-artifacts")]
         output: PathBuf,
@@ -1668,8 +1679,25 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Deploy { command } => match command {
-            DeployCommands::Bootstrap { user, behind_proxy, cors, port, output } => {
-                deploy::bootstrap(&output, &user, behind_proxy, &cors, port).await?;
+            DeployCommands::Bootstrap {
+                user,
+                behind_proxy,
+                cors,
+                port,
+                alert_cmd,
+                ping_url,
+                output,
+            } => {
+                deploy::bootstrap(
+                    &output,
+                    &user,
+                    behind_proxy,
+                    &cors,
+                    port,
+                    alert_cmd.as_deref(),
+                    ping_url.as_deref(),
+                )
+                .await?;
             }
             DeployCommands::Env { behind_proxy, cors, port, output } => {
                 deploy::env(&output, behind_proxy, &cors, port).await?;

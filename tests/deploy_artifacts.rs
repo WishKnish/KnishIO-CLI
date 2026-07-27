@@ -68,6 +68,57 @@ fn bootstrap_artifact_invariants() {
     assert!(!s.contains("== 50"), "must not hardcode a migration count");
     // pgvector floor gate.
     assert!(s.contains("0.7.0"));
+
+    // F-19/F-20 day-2 ops. STATE_DIR is what makes FAIL_THRESHOLD mean anything in --once
+    // mode: a fresh process per timer firing cannot hold a counter, so without it every
+    // single blip alerts. /var/lib/knishio must exist before the timer starts using it.
+    assert!(s.contains("Environment=STATE_DIR=/var/lib/knishio"));
+    let statedir = s.find("install -d -m 700 -o knishio -g knishio /var/lib/knishio").expect("state dir");
+    let health_timer = s.find("knishio-health.timer").expect("health timer");
+    assert!(statedir < health_timer, "/var/lib/knishio must be created before the probe timer");
+
+    // The prune script + its unit are guarded: tarballs predating F-20 do not ship the
+    // script, and an unguarded `install` of a missing file would abort the whole bootstrap.
+    assert!(s.contains("if [ -f cargo-target-prune.sh ]; then"));
+    assert!(s.contains("if [ -x /usr/local/bin/cargo-target-prune.sh ]; then"));
+    // It must prune the DEV profile only, never the release binary's directory.
+    assert!(s.contains("knishio-cargo-prune.timer"));
+    assert!(!s.contains("rm -rf /home/forge/.cargo-target/knishio-validator/release"));
+
+    // Alerting is opt-in: with neither flag the unit must not gain either Environment line,
+    // so bootstrap stays byte-identical for anyone not configuring a channel.
+    assert!(!s.contains("Environment=ALERT_CMD="), "ALERT_CMD must be absent unless requested");
+    assert!(!s.contains("Environment=PING_URL="), "PING_URL must be absent unless requested");
+}
+
+/// The alerting channel is opt-in, so the flags must actually reach the generated unit —
+/// and the dead-man's-switch must land on the health service (the only unit that knows
+/// whether a probe SUCCEEDED, which is what makes missing check-ins meaningful).
+#[test]
+fn bootstrap_alerting_flags_reach_the_unit() {
+    let dir = tmpdir("bootstrap-alert");
+    let out = knishio()
+        .args([
+            "deploy", "bootstrap",
+            "--user", "forge",
+            "--alert-cmd", "/usr/local/bin/pager.sh",
+            "--ping-url", "https://example.invalid/ping/abc",
+            "--output", dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = std::fs::read_to_string(dir.join("knishio-bootstrap.sh")).unwrap();
+    bash_n(&dir.join("knishio-bootstrap.sh"));
+
+    assert!(s.contains("Environment=ALERT_CMD=/usr/local/bin/pager.sh"));
+    assert!(s.contains("Environment=PING_URL=https://example.invalid/ping/abc"));
+    // Both must sit inside the health unit, before its ExecStart — systemd ignores
+    // Environment= lines that land after the ExecStart of a different unit.
+    let health = s.find("knishio-health.service").expect("health unit");
+    let ping = s.find("Environment=PING_URL=").expect("ping env");
+    let exec = s.find("ExecStart=/usr/local/bin/health-monitor.sh").expect("exec");
+    assert!(health < ping && ping < exec, "PING_URL must be inside the health unit");
 }
 
 #[test]
