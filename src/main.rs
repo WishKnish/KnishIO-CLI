@@ -1270,16 +1270,21 @@ async fn main() -> Result<()> {
     // additionally confirm (or --yes).
     match banner_kind(&cli.command) {
         BannerKind::Http => target::banner_http(&cfg.validator.url, cfg.url_source),
-        BannerKind::DockerPsql => match &host {
-            Some(h) if !cli.local => target::banner_transport(&format!(
-                "ssh://{} (sudo -u postgres psql)",
-                h
-            )),
-            _ => target::banner_transport(&format!(
-                "docker://{} (docker exec psql — local stack)",
-                cfg.docker.postgres_container
-            )),
-        },
+        // Banner from the RESOLVED transport, never a parallel guess. This block used
+        // to re-derive the string inline and hardcode `docker://…` for anything that
+        // wasn't ssh — a second copy of the "local means docker" assumption that CLI-7
+        // fixed in psql.rs, so a bare-metal host would have been told `docker://` while
+        // actually using `sudo -u postgres psql`. Same two-hand-written-copies drift as
+        // CLI-4/CLI-5; deriving from `describe()` removes it structurally.
+        //
+        // On a resolution error, print nothing: the command re-resolves immediately and
+        // surfaces that error properly, and a banner naming a target we could not
+        // determine would be worse than none.
+        BannerKind::DockerPsql => {
+            if let Ok(t) = psql::PsqlTransport::resolve(&cfg, host.as_deref(), cli.local) {
+                target::banner_transport(&t.describe());
+            }
+        }
         BannerKind::Compose => target::banner_transport("docker compose (local stack)"),
         BannerKind::Silent => {}
     }

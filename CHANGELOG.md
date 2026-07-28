@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.2.7
+
+Bug-fix release: `cell` / `audit` now work on a bare-metal deployment. Found by
+running the CLI on the testnet server itself.
+
+- **`cell` / `audit` had no transport for a local bare-metal PostgreSQL** (CLI-7).
+  `PsqlTransport` offered only `DockerExec` and `Ssh`, so **"local" was hardcoded to
+  mean "docker"** — and a runbook host runs PGDG Postgres with no Docker at all.
+  Every route dead-ended: bare `cell list` and `--local` both hit
+  `docker exec` → *"Failed to exec into postgres container — is the stack running?"*,
+  telling the operator to start a stack that cannot exist there, while
+  `--host user@host` meant ssh-ing to yourself. New `LocalPsql` variant runs
+  `sudo -n -u postgres psql`, which is exactly what the
+  `(postgres) NOPASSWD: /usr/bin/psql` grant that `deploy bootstrap` already installs
+  permits — so nothing new needs provisioning. No new flags, no new config.
+- **Selection cannot regress a developer machine.** A container that *exists but is
+  stopped* still resolves to Docker, preserving the correct "start the stack"
+  diagnosis; only a genuinely absent container (or no Docker) falls through to bare
+  metal. Silently connecting to some *other* local Postgres would be far worse than
+  an error, so the decision is a pure function over observed capabilities with the
+  whole matrix unit-tested — including a guard, verified failing, that a stopped
+  container must not fall through.
+- **The TARGET banner no longer lies.** `main.rs` re-derived the banner inline and
+  hardcoded `docker://…` for anything non-ssh — a *second* copy of the same
+  assumption, which would have reported `docker://` while actually using
+  `sudo -u postgres psql`. It now derives from the resolved transport's
+  `describe()`, removing the drift structurally (same class as CLI-4/CLI-5), and
+  prints nothing when no transport resolves rather than naming a target it could not
+  determine.
+- **Better errors.** A stopped container now says *"exists but is stopped — run
+  `knishio start`"* instead of falling through to a generic message; when nothing is
+  available the error names **both** attempted paths (docker container and the sudo
+  psql command) plus the `--host` option. The CLI-2 guard's wording no longer says
+  `--local` means "the local docker stack", since it now means this machine's
+  database either way.
+- **Note on confirmation:** bare-metal local psql counts as local, so mutating
+  `cell`/`audit` commands there do **not** prompt (deliberate). On a deployed node
+  "local" is production — read-only commands never prompted anyway, and `--yes`
+  remains for scripts.
+
+Verified on the testnet box (built from source there, since `cell list` had no way to
+work before this): banner reads `local://postgres (… bare metal)`, `cell list` matches
+raw `psql` exactly (2 cells), `cell usage` and `audit list` work, and
+`activate`/`archive` were confirmed against the database on each transition. `--host`
+and the CLI-2 guard behave as before.
+
 ## 0.2.6
 
 Day-2 ops release: alerting that can actually reach a human, and bounded CD disk
