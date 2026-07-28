@@ -26,18 +26,26 @@ pub const SUDO_UPGRADE: &str = "/usr/local/bin/upgrade.sh";
 pub const SUDO_SYSTEMCTL_RESTART: &str = "/usr/bin/systemctl restart knishio-validator";
 pub const SUDO_SYSTEMCTL_STATUS: &str = "/usr/bin/systemctl status knishio-validator";
 pub const SUDO_PSQL: &str = "/usr/bin/psql";
+/// `pg_dump` as `postgres`, for `knishio backup` on a bare-metal host (CLI-8).
+///
+/// Grants **no new authority**: the `psql` line above already runs as `postgres`, which can
+/// read and write every table. This is the same authority in a purpose-built tool, added
+/// because `pg_dump` is not reachable through `psql`.
+pub const SUDO_PG_DUMP: &str = "/usr/bin/pg_dump";
 
 /// Render the sudoers drop-in for `deploy_user` from the shared consts.
 pub fn sudoers_content(deploy_user: &str) -> String {
     format!(
         "{u} ALL=(root) NOPASSWD: {upgrade}\n\
          {u} ALL=(root) NOPASSWD: {restart}, {status}\n\
-         {u} ALL=(postgres) NOPASSWD: {psql}\n",
+         {u} ALL=(postgres) NOPASSWD: {psql}\n\
+         {u} ALL=(postgres) NOPASSWD: {pg_dump}\n",
         u = deploy_user,
         upgrade = SUDO_UPGRADE,
         restart = SUDO_SYSTEMCTL_RESTART,
         status = SUDO_SYSTEMCTL_STATUS,
         psql = SUDO_PSQL,
+        pg_dump = SUDO_PG_DUMP,
     )
 }
 
@@ -280,6 +288,8 @@ mod tests {
         assert!(s.contains(SUDO_SYSTEMCTL_RESTART));
         assert!(s.contains(SUDO_SYSTEMCTL_STATUS));
         assert!(s.contains(SUDO_PSQL));
+        // CLI-8: bare-metal `knishio backup` needs pg_dump as postgres.
+        assert!(s.contains(SUDO_PG_DUMP), "pg_dump grant missing — bare-metal backup will fail");
         assert!(s.lines().all(|l| l.starts_with("forge ")));
     }
 

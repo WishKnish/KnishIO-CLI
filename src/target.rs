@@ -82,14 +82,35 @@ pub fn banner_transport(transport: &str) {
 /// - Interactive TTY: y/N prompt naming the target.
 /// - Non-interactive without `--yes`: hard error (never hangs CI/scripts).
 pub fn confirm_mutation(action: &str, target_desc: &str, is_local: bool, yes: bool) -> Result<()> {
-    if is_local || yes {
+    if is_local {
+        return Ok(());
+    }
+    prompt(action, target_desc, yes, true)
+}
+
+/// Gate an IRREVERSIBLE action regardless of locality.
+///
+/// `confirm_mutation` skips local targets because a dev stack is cheap to break. That
+/// reasoning does not extend to operations that destroy data — `restore` DROPs the
+/// database, and on a bare-metal host "local" is production. Same TTY/`--yes` mechanics,
+/// but no locality escape and no locality CLAIM in the message: saying "non-local target
+/// docker://…" about a local target would be exactly the kind of inaccurate output this
+/// CLI has been fixing.
+pub fn confirm_destructive(action: &str, target_desc: &str, yes: bool) -> Result<()> {
+    prompt(action, target_desc, yes, false)
+}
+
+fn prompt(action: &str, target_desc: &str, yes: bool, claim_nonlocal: bool) -> Result<()> {
+    if yes {
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
+        let subject = if claim_nonlocal { "non-local target " } else { "" };
         anyhow::bail!(
-            "refusing to {} against non-local target {} without confirmation \
+            "refusing to {} against {}{} without confirmation \
              (non-interactive session). Re-run with --yes to proceed.",
             action,
+            subject,
             target_desc
         );
     }

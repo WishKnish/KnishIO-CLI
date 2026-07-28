@@ -204,48 +204,9 @@ impl PsqlTransport {
     /// operator-friendly messages; `missing_hint` customizes the
     /// "relation does not exist" case (audit uses its own).
     pub async fn exec_with_hint(&self, sql: &str, missing_hint: &str) -> Result<String> {
-        let mut cmd = match self {
-            PsqlTransport::DockerExec { container, user, db } => {
-                let mut c = Command::new("docker");
-                c.args([
-                    "exec", "-i", container, "psql", "-U", user, "-d", db, "-q", "-t", "-A",
-                    "-f", "-",
-                ]);
-                c
-            }
-            PsqlTransport::LocalPsql { db } => {
-                let mut c = Command::new("sudo");
-                c.args([
-                    "-n", "-u", "postgres", "psql", "-d", db, "-q", "-t", "-A", "-f", "-",
-                ]);
-                c
-            }
-            PsqlTransport::Ssh { host, db } => {
-                let ssh_bin =
-                    std::env::var("KNISHIO_SSH_BIN").unwrap_or_else(|_| "ssh".to_string());
-                let mut c = Command::new(ssh_bin);
-                c.args([
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=10",
-                    host,
-                    "sudo",
-                    "-n",
-                    "-u",
-                    "postgres",
-                    "psql",
-                    "-d",
-                    db,
-                    "-q",
-                    "-t",
-                    "-A",
-                    "-f",
-                    "-",
-                ]);
-                c
-            }
-        };
+        let (program, args) = self.psql_stdin_argv(self.db_name());
+        let mut cmd = Command::new(&program);
+        cmd.args(&args);
 
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -308,6 +269,121 @@ impl PsqlTransport {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    /// The database this transport administers.
+    pub fn db_name(&self) -> &str {
+        match self {
+            PsqlTransport::DockerExec { db, .. }
+            | PsqlTransport::Ssh { db, .. }
+            | PsqlTransport::LocalPsql { db } => db,
+        }
+    }
+
+    /// The stdin-fed `psql` command line for an arbitrary database, as (program, args).
+    ///
+    /// Single source for the exec path and for restore's dump pipe, so the two cannot
+    /// drift the way the banner drifted from the transport in CLI-7b.
+    pub fn psql_stdin_argv(&self, db: &str) -> (String, Vec<String>) {
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        match self {
+            PsqlTransport::DockerExec { container, user, .. } => (
+                "docker".into(),
+                owned(&[
+                    "exec", "-i", container, "psql", "-U", user, "-d", db, "-q", "-t", "-A", "-f",
+                    "-",
+                ]),
+            ),
+            PsqlTransport::LocalPsql { .. } => (
+                "sudo".into(),
+                owned(&[
+                    "-n", "-u", "postgres", "psql", "-d", db, "-q", "-t", "-A", "-f", "-",
+                ]),
+            ),
+            PsqlTransport::Ssh { host, .. } => (
+                std::env::var("KNISHIO_SSH_BIN").unwrap_or_else(|_| "ssh".to_string()),
+                owned(&[
+                    "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "sudo", "-n", "-u",
+                    "postgres", "psql", "-d", db, "-q", "-t", "-A", "-f", "-",
+                ]),
+            ),
+        }
+    }
+
+    /// The `pg_dump` command line for this transport, as (program, args).
+    ///
+    /// Pure so the three shapes are unit-assertable without spawning anything. Note the
+    /// bare-metal and ssh arms take **no `-U`**: they already run *as* the `postgres`
+    /// role via sudo, exactly as their `psql` counterparts do. Only the Docker arm needs
+    /// `-U`, because there the client runs inside the container as root.
+    pub fn pg_dump_argv(&self) -> (String, Vec<String>) {
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        match self {
+            PsqlTransport::DockerExec { container, user, db } => (
+                "docker".into(),
+                owned(&[
+                    "exec", container, "pg_dump", "-U", user, "-d", db, "--no-owner", "--no-acl",
+                ]),
+            ),
+            PsqlTransport::LocalPsql { db } => (
+                "sudo".into(),
+                owned(&[
+                    "-n", "-u", "postgres", "pg_dump", "-d", db, "--no-owner", "--no-acl",
+                ]),
+            ),
+            PsqlTransport::Ssh { host, db } => (
+                std::env::var("KNISHIO_SSH_BIN").unwrap_or_else(|_| "ssh".to_string()),
+                owned(&[
+                    "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "sudo", "-n", "-u",
+                    "postgres", "pg_dump", "-d", db, "--no-owner", "--no-acl",
+                ]),
+            ),
+        }
+    }
+
+    /// Stream a `pg_dump` of the database to bytes.
+    pub async fn pg_dump(&self) -> Result<Vec<u8>> {
+        let (program, args) = self.pg_dump_argv();
+        let out = Command::new(&program)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .with_context(|| format!("Failed to run {program} for pg_dump"))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("a password is required") || stderr.contains("sudo:") {
+                anyhow::bail!(
+                    "pg_dump refused: the sudoers grant for `sudo -u postgres pg_dump` is \
+                     missing on this host. It is installed by `knishio deploy bootstrap` \
+                     (0.2.7+); hosts provisioned earlier only granted psql."
+                );
+            }
+            anyhow::bail!("pg_dump failed: {}", stderr.trim());
+        }
+        Ok(out.stdout)
+    }
+
+    /// Run SQL against an ARBITRARY database on this transport.
+    ///
+    /// Restore needs the `postgres` maintenance database to drop/recreate the target, which
+    /// [`exec`] cannot express since it is pinned to the configured database.
+    pub async fn exec_on_db(&self, db: &str, sql: &str) -> Result<String> {
+        self.with_db(db).exec(sql).await
+    }
+
+    /// This transport retargeted at another database. Pure, so the retargeting itself is
+    /// unit-testable — restore depends on it to drop the database it is not connected to.
+    pub fn with_db(&self, db: &str) -> Self {
+        let mut t = self.clone();
+        match &mut t {
+            PsqlTransport::DockerExec { db: d, .. }
+            | PsqlTransport::Ssh { db: d, .. }
+            | PsqlTransport::LocalPsql { db: d } => *d = db.to_string(),
+        }
+        t
+    }
+
     /// [`exec_with_hint`] with the default missing-relation hint.
     pub async fn exec(&self, sql: &str) -> Result<String> {
         self.exec_with_hint(sql, DEFAULT_MISSING_HINT).await
@@ -349,6 +425,74 @@ mod tests {
 
         // Neither → None, so the caller can name both attempted paths.
         assert!(select_local(caps(false, false, false), "pg", "knishio", "knishio").is_none());
+    }
+
+    /// The exact pg_dump command line per transport (CLI-8). Pure, so this asserts the
+    /// real argv without a daemon, a database, or a network.
+    #[test]
+    fn pg_dump_argv_per_transport() {
+        let docker = PsqlTransport::DockerExec {
+            container: "pg".into(),
+            user: "knishio".into(),
+            db: "knishio".into(),
+        };
+        let (p, a) = docker.pg_dump_argv();
+        assert_eq!(p, "docker");
+        assert_eq!(
+            a,
+            vec!["exec", "pg", "pg_dump", "-U", "knishio", "-d", "knishio", "--no-owner", "--no-acl"]
+        );
+
+        // Bare metal runs AS postgres via sudo, so it must NOT pass -U (that would try to
+        // connect as a role that may not exist on a server).
+        let bare = PsqlTransport::LocalPsql { db: "knishio".into() };
+        let (p, a) = bare.pg_dump_argv();
+        assert_eq!(p, "sudo");
+        assert_eq!(
+            a,
+            vec!["-n", "-u", "postgres", "pg_dump", "-d", "knishio", "--no-owner", "--no-acl"]
+        );
+        assert!(!a.contains(&"-U".to_string()), "bare metal must not pass -U");
+
+        let ssh = PsqlTransport::Ssh { host: "forge@h".into(), db: "knishio".into() };
+        let (_, a) = ssh.pg_dump_argv();
+        assert!(a.contains(&"forge@h".to_string()));
+        assert!(a.contains(&"pg_dump".to_string()));
+        assert!(a.contains(&"BatchMode=yes".to_string()), "ssh must never prompt");
+        assert!(!a.contains(&"-U".to_string()));
+    }
+
+    /// `exec_on_db` must retarget the database (restore drops the configured one) while
+    /// leaving the transport's other fields alone.
+    #[test]
+    fn psql_stdin_argv_retargets_the_database() {
+        let docker = PsqlTransport::DockerExec {
+            container: "pg".into(),
+            user: "knishio".into(),
+            db: "knishio".into(),
+        };
+        let (_, a) = docker.psql_stdin_argv("postgres");
+        assert!(a.windows(2).any(|w| w == ["-d", "postgres"]), "argv: {a:?}");
+        // stdin-fed, so no nested shell quoting anywhere.
+        assert_eq!(a.last().map(String::as_str), Some("-"));
+
+        let bare = PsqlTransport::LocalPsql { db: "knishio".into() };
+        let (p, a) = bare.psql_stdin_argv("postgres");
+        assert_eq!(p, "sudo");
+        assert!(a.windows(2).any(|w| w == ["-d", "postgres"]), "argv: {a:?}");
+        assert_eq!(bare.db_name(), "knishio", "db_name must reflect the transport, not the override");
+
+        // `exec_on_db` retargets via `with_db`. If this silently returned the original
+        // transport, restore would issue DROP DATABASE while connected to the very database
+        // it is dropping — the whole reason the maintenance DB is used.
+        for t in [
+            PsqlTransport::DockerExec { container: "pg".into(), user: "u".into(), db: "knishio".into() },
+            PsqlTransport::LocalPsql { db: "knishio".into() },
+            PsqlTransport::Ssh { host: "h".into(), db: "knishio".into() },
+        ] {
+            assert_eq!(t.with_db("postgres").db_name(), "postgres", "with_db must retarget: {t:?}");
+            assert_eq!(t.db_name(), "knishio", "with_db must not mutate the original");
+        }
     }
 
     /// Bare-metal counts as local, so mutations are not gated behind a prompt

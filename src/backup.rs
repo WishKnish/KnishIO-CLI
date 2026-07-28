@@ -1,7 +1,11 @@
 //! `knishio backup` / `knishio restore` — database backup and restore.
 //!
-//! Uses `docker exec` to run pg_dump/pg_restore inside the postgres container,
-//! following the same pattern as cell.rs for container access.
+//! Goes through `PsqlTransport`, so these work on a Docker stack, a bare-metal host
+//! (`sudo -u postgres`), or a remote server over ssh — one dispatch, shared with
+//! cell/audit. Previously this module hardcoded `docker exec` at every site and kept
+//! its own container check, which made `knishio backup` fail on a runbook host for the
+//! same reason cell/audit did (CLI-8): the docker-only assumption was re-implemented
+//! per surface rather than living in one place.
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -10,17 +14,14 @@ use tokio::process::Command;
 
 use crate::config::Config;
 use crate::output;
+use crate::psql::PsqlTransport;
 
 /// Create a compressed database backup.
 ///
 /// Output path defaults to `./backups/knishio_YYYYMMDD_HHMMSS.sql.gz`.
-pub async fn backup(cfg: &Config, output_path: Option<&str>) -> Result<()> {
-    let container = &cfg.docker.postgres_container;
-    let db_user = &cfg.database.user;
-    let db_name = &cfg.database.name;
-
-    // Verify container is running
-    verify_container(container).await?;
+pub async fn backup(t: &PsqlTransport, output_path: Option<&str>) -> Result<()> {
+    // No container pre-check: transport resolution already failed loudly (naming every
+    // mechanism it tried) if nothing could reach a database.
 
     // Determine output path
     let timestamp = chrono_timestamp();
@@ -35,25 +36,12 @@ pub async fn backup(cfg: &Config, output_path: Option<&str>) -> Result<()> {
 
     output::info(&format!("Backing up database to {}...", dest));
 
-    // Run pg_dump inside the container and capture output
-    let dump_output = Command::new("docker")
-        .args(["exec", container, "pg_dump", "-U", db_user, "-d", db_name, "--no-owner", "--no-acl"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to run pg_dump — is the postgres container running?")?;
+    let dump = t.pg_dump().await?;
 
-    if !dump_output.status.success() {
-        let stderr = String::from_utf8_lossy(&dump_output.stderr);
-        anyhow::bail!("pg_dump failed: {}", stderr.trim());
-    }
-
-    // Write to file
-    std::fs::write(dest, &dump_output.stdout)
+    std::fs::write(dest, &dump)
         .with_context(|| format!("Failed to write backup to {}", dest))?;
 
-    let size_mb = dump_output.stdout.len() as f64 / (1024.0 * 1024.0);
+    let size_mb = dump.len() as f64 / (1024.0 * 1024.0);
     output::success(&format!("Backup complete: {} ({:.1} MB)", dest, size_mb));
 
     Ok(())
@@ -62,18 +50,18 @@ pub async fn backup(cfg: &Config, output_path: Option<&str>) -> Result<()> {
 /// Restore a database from a backup file.
 ///
 /// After restore, runs /db-check to verify consistency.
-pub async fn restore(cfg: &Config, backup_path: &str, skip_verify: bool) -> Result<()> {
-    let container = &cfg.docker.postgres_container;
-    let db_user = &cfg.database.user;
-    let db_name = &cfg.database.name;
+pub async fn restore(
+    cfg: &Config,
+    t: &PsqlTransport,
+    backup_path: &str,
+    skip_verify: bool,
+) -> Result<()> {
+    let db_name = t.db_name().to_string();
 
     // Verify backup file exists
     if !Path::new(backup_path).exists() {
         anyhow::bail!("Backup file not found: {}", backup_path);
     }
-
-    // Verify container is running
-    verify_container(container).await?;
 
     output::warn(&format!("Restoring database from {}...", backup_path));
     output::warn("This will overwrite the current database contents.");
@@ -90,19 +78,19 @@ pub async fn restore(cfg: &Config, backup_path: &str, skip_verify: bool) -> Resu
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}' AND pid <> pg_backend_pid();",
         db_name
     );
-    run_psql(container, db_user, "postgres", &terminate_sql).await?;
-
-    // Drop and recreate
-    let drop_sql = format!("DROP DATABASE IF EXISTS \"{}\";", db_name);
-    run_psql(container, db_user, "postgres", &drop_sql).await?;
-
-    let create_sql = format!("CREATE DATABASE \"{}\";", db_name);
-    run_psql(container, db_user, "postgres", &create_sql).await?;
+    // All three against the `postgres` maintenance database — the target is being
+    // dropped, so we cannot be connected to it.
+    t.exec_on_db("postgres", &terminate_sql).await?;
+    t.exec_on_db("postgres", &format!("DROP DATABASE IF EXISTS \"{}\";", db_name))
+        .await?;
+    t.exec_on_db("postgres", &format!("CREATE DATABASE \"{}\";", db_name))
+        .await?;
 
     // Pipe the SQL dump into psql
     output::info("Restoring data...");
-    let mut child = Command::new("docker")
-        .args(["exec", "-i", container, "psql", "-U", db_user, "-d", db_name, "-q"])
+    let (program, args) = t.psql_stdin_argv(&db_name);
+    let mut child = Command::new(&program)
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -182,44 +170,6 @@ pub async fn list() -> Result<()> {
         println!("  {} ({})", entry.path().display(), size_str);
     }
 
-    Ok(())
-}
-
-/// Verify a container is running.
-async fn verify_container(container: &str) -> Result<()> {
-    let output = Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}}", container])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .context("Failed to check container status — is Docker running?")?;
-
-    let running = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if running != "true" {
-        anyhow::bail!(
-            "Container '{}' is not running. Start the stack first: knishio start -d",
-            container
-        );
-    }
-    Ok(())
-}
-
-/// Run a SQL statement via psql in the container.
-async fn run_psql(container: &str, user: &str, db: &str, sql: &str) -> Result<()> {
-    let output = Command::new("docker")
-        .args(["exec", container, "psql", "-U", user, "-d", db, "-c", sql])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("FATAL") {
-            anyhow::bail!("psql command failed: {}", stderr.trim());
-        }
-    }
     Ok(())
 }
 

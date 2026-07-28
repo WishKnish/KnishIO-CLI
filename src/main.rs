@@ -1479,14 +1479,29 @@ async fn main() -> Result<()> {
         // ── Backup / Restore ────────────────────────────────
         Commands::Backup { command } => match command {
             BackupCommands::Create { output } => {
-                backup::backup(&cfg, output.as_deref()).await?;
+                // Same precedence as cell/audit: --local wins over a [deploy] host default.
+                let host_eff = if local { None } else { host.as_deref() };
+                let t = psql::PsqlTransport::resolve(&cfg, host_eff, local)?;
+                backup::backup(&t, output.as_deref()).await?;
             }
             BackupCommands::List => {
                 backup::list().await?;
             }
         },
         Commands::Restore { path, skip_verify } => {
-            backup::restore(&cfg, &path, skip_verify).await?;
+            let host_eff = if local { None } else { host.as_deref() };
+            let t = psql::PsqlTransport::resolve(&cfg, host_eff, local)?;
+            // `is_local: false` is HARDCODED, not a bug: restore DROPs and recreates the
+            // database, so it must confirm on every transport — including a bare-metal host
+            // where "local" is production. Cell mutations skip the prompt because they edit
+            // recoverable metadata; this is irreversible, a different risk class. The shared
+            // helper already hard-errors (never hangs) non-interactively without --yes.
+            target::confirm_destructive(
+                &format!("DROP and recreate the `{}` database from {}", t.db_name(), path),
+                &t.describe(),
+                yes,
+            )?;
+            backup::restore(&cfg, &t, &path, skip_verify).await?;
         }
 
         // ── Psql ────────────────────────────────────────────

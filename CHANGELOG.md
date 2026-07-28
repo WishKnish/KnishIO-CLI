@@ -2,8 +2,9 @@
 
 ## 0.2.7
 
-Bug-fix release: `cell` / `audit` now work on a bare-metal deployment. Found by
-running the CLI on the testnet server itself.
+Bug-fix release: **every database-side command now works on a bare-metal deployment** —
+`cell`, `audit`, `backup` and `restore`. Found by running the CLI on the testnet server
+itself, where "local" had been hardcoded to mean "docker" in two separate places.
 
 - **`cell` / `audit` had no transport for a local bare-metal PostgreSQL** (CLI-7).
   `PsqlTransport` offered only `DockerExec` and `Ssh`, so **"local" was hardcoded to
@@ -39,12 +40,40 @@ running the CLI on the testnet server itself.
   `cell`/`audit` commands there do **not** prompt (deliberate). On a deployed node
   "local" is production — read-only commands never prompted anyway, and `--yes`
   remains for scripts.
+- **`backup` / `restore` also worked only on Docker** (CLI-8). `backup.rs` hardcoded
+  `docker exec` at 7 sites and kept its own container check, so it failed on a
+  bare-metal host for the same root cause — the docker-only assumption had simply been
+  re-implemented on a second surface. Both now go through `PsqlTransport`, so they work
+  on a Docker stack, a bare-metal host, or a remote server over ssh from one dispatch.
+  `verify_container()` and `run_psql()` are gone; transport resolution already reports
+  every mechanism it tried.
+- **New sudoers grant: `(postgres) NOPASSWD: /usr/bin/pg_dump`.** `pg_dump` is not
+  reachable through `psql`, so bare-metal backup needs it. This adds **no new
+  authority** — the existing psql-as-postgres grant can already read and write every
+  table. Hosts provisioned before 0.2.7 need the grant added; `backup` there fails with
+  an error saying exactly that instead of something generic.
+- **`restore` now requires confirmation on every transport.** It DROPs and recreates the
+  database, and previously had *no* confirmation at all — safe only by accident, because
+  it needed Docker and so merely failed on a server. Making it work on bare metal would
+  otherwise have meant dropping a production database with no prompt. New
+  `confirm_destructive` helper: same TTY / `--yes` mechanics as `confirm_mutation` but no
+  locality escape, since `cell activate` edits recoverable metadata while this is
+  irreversible. It also drops the locality *claim* from the message — the old wording
+  would have said "non-local target docker://…" about a target that is local.
 
 Verified on the testnet box (built from source there, since `cell list` had no way to
 work before this): banner reads `local://postgres (… bare metal)`, `cell list` matches
 raw `psql` exactly (2 cells), `cell usage` and `audit list` work, and
 `activate`/`archive` were confirmed against the database on each transition. `--host`
 and the CLI-2 guard behave as before.
+
+The destructive path was proven on the **local dev stack**, never on testnet: backup →
+create a marker cell → restore → the marker is gone (0) while a cell from the backup
+survives (1). On the box only the *gate* was exercised — proving a destructive operation
+by running it against production would be an outage, not a verification. Bare-metal
+`backup` was confirmed to fail with the actionable missing-grant message before the
+sudoers update, and `pg_dump` argv is unit-asserted per transport (bare metal and ssh
+correctly omit `-U`, since they already run as `postgres`).
 
 ## 0.2.6
 
