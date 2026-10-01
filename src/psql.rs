@@ -100,6 +100,21 @@ impl PsqlTransport {
     /// neither `--host` nor `--local`, refuse — the URL *looks* like the
     /// target but psql-side admin cannot travel over it.
     pub fn resolve(cfg: &Config, host: Option<&str>, local: bool) -> Result<Self> {
+        Self::resolve_with_probe(cfg, host, local, || {
+            Self::probe_local_caps(&cfg.docker.postgres_container, &cfg.database.name)
+        })
+    }
+
+    /// [`resolve`] with the local-capability probe injected, so the flag/URL
+    /// decision table is testable without Docker or Postgres. The probe runs only
+    /// when the local path is actually taken — never for `--host` or the CLI-2
+    /// refusal — matching the production order.
+    pub fn resolve_with_probe(
+        cfg: &Config,
+        host: Option<&str>,
+        local: bool,
+        probe: impl FnOnce() -> LocalCapabilities,
+    ) -> Result<Self> {
         if let Some(h) = host {
             return Ok(PsqlTransport::Ssh {
                 host: h.to_string(),
@@ -116,7 +131,7 @@ impl PsqlTransport {
                 cfg.validator.url
             );
         }
-        let caps = Self::probe_local_caps(&cfg.docker.postgres_container, &cfg.database.name);
+        let caps = probe();
         select_local(
             caps,
             &cfg.docker.postgres_container,
@@ -504,27 +519,44 @@ mod tests {
         assert!(!PsqlTransport::Ssh { host: "h".into(), db: "d".into() }.is_local());
     }
 
+    /// The flag/URL decision table, with the host probe injected so it runs on any
+    /// machine (CI runners have neither the container nor `sudo -u postgres psql`).
     #[test]
     fn resolve_matrix() {
+        fn no_probe() -> LocalCapabilities {
+            panic!("probe must not run on this path")
+        }
         let mut cfg = Config::default();
 
-        // Local URL, no flags → DockerExec.
-        let t = PsqlTransport::resolve(&cfg, None, false).unwrap();
+        // Local URL, no flags, container exists → DockerExec.
+        let t = PsqlTransport::resolve_with_probe(&cfg, None, false, || caps(true, true, false)).unwrap();
+        assert!(matches!(t, PsqlTransport::DockerExec { .. }), "got {t:?}");
         assert!(t.is_local());
 
-        // Explicit --host → Ssh regardless of URL.
-        let t = PsqlTransport::resolve(&cfg, Some("forge@testnet.knish.io"), false).unwrap();
+        // Local URL, no container, local psql works → bare metal.
+        let t = PsqlTransport::resolve_with_probe(&cfg, None, false, || caps(false, false, true)).unwrap();
+        assert!(matches!(t, PsqlTransport::LocalPsql { .. }), "got {t:?}");
+
+        // Local URL, neither available → the error names both attempted paths.
+        let err = PsqlTransport::resolve_with_probe(&cfg, None, false, || caps(false, false, false))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("docker container `knishio-postgres`"), "err: {err}");
+        assert!(err.contains("`sudo -n -u postgres psql -d knishio`"), "err: {err}");
+
+        // Explicit --host → Ssh regardless of URL, without probing this machine.
+        let t = PsqlTransport::resolve_with_probe(&cfg, Some("forge@testnet.knish.io"), false, no_probe).unwrap();
         assert!(!t.is_local());
         assert!(t.describe().contains("ssh://forge@testnet.knish.io"));
 
-        // Remote URL, no flags → the CLI-2 hard error.
+        // Remote URL, no flags → the CLI-2 hard error, without probing.
         cfg.validator.url = "https://testnet.knish.io".into();
-        let err = PsqlTransport::resolve(&cfg, None, false).unwrap_err();
+        let err = PsqlTransport::resolve_with_probe(&cfg, None, false, no_probe).unwrap_err();
         assert!(err.to_string().contains("--host"), "err: {err}");
         assert!(err.to_string().contains("--local"), "err: {err}");
 
-        // Remote URL + explicit --local → DockerExec (operator opted in).
-        let t = PsqlTransport::resolve(&cfg, None, true).unwrap();
-        assert!(t.is_local());
+        // Remote URL + explicit --local → local path (operator opted in).
+        let t = PsqlTransport::resolve_with_probe(&cfg, None, true, || caps(true, false, false)).unwrap();
+        assert!(matches!(t, PsqlTransport::DockerExec { .. }), "got {t:?}");
     }
 }

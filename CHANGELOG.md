@@ -8,6 +8,12 @@
   `secrets/` adds a missing `validator_kem_secret` and leaves every other file
   untouched. jwt/db files are never backfilled because `db_url` embeds
   `db_password`.
+- **CI no longer depends on the build host's Postgres.** `psql::tests::resolve_matrix`
+  called `PsqlTransport::resolve`, which probes for a real `knishio-postgres`
+  container or `sudo -u postgres psql`; it passed only on machines with that
+  container and failed on every CI runner since 0.2.7. The decision table now
+  lives in `resolve_with_probe` with the capability probe injected; `resolve`
+  is unchanged for callers and still probes only on the local path.
 
 ## 0.2.7
 
