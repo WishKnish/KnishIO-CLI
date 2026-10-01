@@ -225,6 +225,9 @@ fn make_auth(secret: &str, bundle: &str) -> Result<Molecule> {
 
 /// Create a meta molecule (M+I). Auto-adds I-atom.
 /// `meta_type` is cycled from BENCH_META_TYPES for realistic bonding diversity.
+/// The metaId carries the plan's `run_id`: meta ownership is global on the
+/// validator (first writer's bundle), so two plans replayed into one database
+/// without a purge in between must not share metaIds.
 fn make_meta(
     secret: &str,
     bundle: &str,
@@ -232,10 +235,11 @@ fn make_meta(
     identity_idx: usize,
     meta_idx: usize,
     meta_type: &str,
+    run_id: u64,
 ) -> Result<Molecule> {
     let type_seq = meta_idx / BENCH_META_TYPES.len();
     let id_slot = type_seq % META_IDS_PER_TYPE;
-    let meta_id = format!("bench-{meta_type}-{identity_idx}-{id_slot}");
+    let meta_id = format!("bench-{meta_type}-{identity_idx}-{id_slot}-{run_id}");
     super::molecules::make_meta_custom(
         secret,
         bundle,
@@ -430,7 +434,8 @@ fn make_value_transfer(
     Ok(mol)
 }
 
-/// Create a rule molecule. Uses init_meta with isotope R pathway.
+/// Create a rule molecule. Uses init_meta with isotope R pathway. The rule id
+/// carries the plan's `run_id` for the same reason as `make_meta`'s metaId.
 fn make_rule(
     secret: &str,
     bundle: &str,
@@ -438,6 +443,7 @@ fn make_rule(
     identity_idx: usize,
     rule_idx: usize,
     rule_target: &str,
+    run_id: u64,
 ) -> Result<Molecule> {
     let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None)
         .context("Failed to create rule wallet")?;
@@ -451,7 +457,7 @@ fn make_rule(
         None,
     );
 
-    let rule_id = format!("bench-rule-{rule_target}-{identity_idx}-{rule_idx}");
+    let rule_id = format!("bench-rule-{rule_target}-{identity_idx}-{rule_idx}-{run_id}");
     mol.init_meta(
         vec![
             MetaItem::new("action", "reject"),
@@ -805,7 +811,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             if run_meta && i < meta_count {
                 let start = Instant::now();
                 let meta_type = BENCH_META_TYPES[(meta_idx + k) % BENCH_META_TYPES.len()];
-                let mol = make_meta(&secret, bundle, &next_pos, k, meta_idx, meta_type)?;
+                let mol = make_meta(&secret, bundle, &next_pos, k, meta_idx, meta_type, run_id)?;
                 next_pos = advance_chain(&mol)?;
                 let (hash, payload) = mol_to_payload(&mol)?;
                 insert_mol(&conn, k, 2, chain_order, global_order, "meta", &hash, &payload)?;
@@ -880,7 +886,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             for r in 0..args.rules_per_identity {
                 let start = Instant::now();
                 let rule_target = BENCH_RULE_TARGETS[r % BENCH_RULE_TARGETS.len()];
-                let mol = make_rule(&secret, bundle, &next_pos, k, r, rule_target)?;
+                let mol = make_rule(&secret, bundle, &next_pos, k, r, rule_target, run_id)?;
                 next_pos = advance_chain(&mol)?;
                 let (hash, payload) = mol_to_payload(&mol)?;
                 insert_mol(

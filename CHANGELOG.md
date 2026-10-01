@@ -7,6 +7,12 @@
   and never resolves the psql transport (so the CLI-2 remote guard is not hit);
   `--cell-slug` is required and names an existing `BENCH_CLI_` cell on the
   validator. Conflicts with `--keep`.
+- **Bench plans no longer share metaIds across runs.** `bench generate` now
+  appends the plan's `run_id` to every meta and rule id
+  (`bench-<type>-<identity>-<slot>-<run_id>`). The validator gives a metaId to
+  the first bundle that writes it, so two plans replayed into one database
+  without a purge in between (`--no-cell-admin`) had the second plan's metas
+  rejected with "does not have write permission".
 
 - **`knishio init` now generates `secrets/validator_kem_secret`** (64 hex chars,
   mode 0600). The production compose requires it: the validator refuses to boot
