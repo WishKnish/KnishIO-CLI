@@ -970,6 +970,11 @@ enum BenchCommands {
         /// Keep benchmark data in DB after execution (default: auto-cleanup)
         #[arg(long)]
         keep: bool,
+
+        /// Skip cell create/purge (no psql/ssh): replay against a remote
+        /// validator whose --cell-slug cell already exists.
+        #[arg(long, conflicts_with = "keep")]
+        no_cell_admin: bool,
     },
 
     /// Clean up benchmark data from the database
@@ -1136,7 +1141,7 @@ enum AuditCommands {
 /// non-local target confirms (or --yes).
 fn resolve_bench_endpoint(
     endpoint: Option<String>,
-    cell_admin: &psql::PsqlTransport,
+    cell_admin: Option<&psql::PsqlTransport>,
     cfg: &config::Config,
     yes: bool,
 ) -> Result<String> {
@@ -1157,8 +1162,8 @@ fn resolve_bench_endpoint(
     };
     // The cell-admin transport is only worth naming when it differs from the
     // submit endpoint's machine (i.e. a remote --host psql/ssh).
-    if !cell_admin.is_local() {
-        target::banner_transport(&format!("cells: {}", cell_admin.describe()));
+    if let Some(admin) = cell_admin.filter(|a| !a.is_local()) {
+        target::banner_transport(&format!("cells: {}", admin.describe()));
     }
     target::confirm_mutation(
         "submit benchmark molecules",
@@ -1539,7 +1544,7 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!(
                         "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
                          DATABASE — a remote endpoint needs --host <user@host> too."))?;
-                let endpoint = resolve_bench_endpoint(endpoint, &cell_admin, &cfg, yes)?;
+                let endpoint = resolve_bench_endpoint(endpoint, Some(&cell_admin), &cfg, yes)?;
                 let exec_args = bench::execute::ExecuteArgs {
                     plan: String::new(), // filled by run()
                     endpoint: Some(endpoint),
@@ -1581,13 +1586,16 @@ async fn main() -> Result<()> {
                 concurrency,
                 cell_slug,
                 keep,
+                no_cell_admin,
             } => {
                 let host_eff = if local { None } else { host.as_deref() };
-                let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
-                    .map_err(|e| anyhow::anyhow!(
+                let cell_admin = bench::execute_cell_admin(no_cell_admin, cell_slug.as_deref(), || {
+                    psql::PsqlTransport::resolve(&cfg, host_eff, local).map_err(|e| anyhow::anyhow!(
                         "{e}\n\nbench auto-creates its BENCH_CLI_* cell in the target's \
-                         DATABASE — a remote endpoint needs --host <user@host> too."))?;
-                let endpoint = resolve_bench_endpoint(endpoint, &cell_admin, &cfg, yes)?;
+                         DATABASE — a remote endpoint needs --host <user@host> too \
+                         (or --no-cell-admin with an existing --cell-slug)."))
+                })?;
+                let endpoint = resolve_bench_endpoint(endpoint, cell_admin.as_ref(), &cfg, yes)?;
                 let exec_args = bench::execute::ExecuteArgs {
                     plan,
                     endpoint: Some(endpoint),
@@ -1598,7 +1606,7 @@ async fn main() -> Result<()> {
                     csv: None,
                     insecure_tls: cfg.validator.insecure_tls,
                 };
-                bench::execute(exec_args, &cfg, &cell_admin, keep).await?;
+                bench::execute(exec_args, &cfg, cell_admin.as_ref(), keep).await?;
             }
             BenchCommands::Clean { cell_slug, all } => {
                 let host_eff = if local { None } else { host.as_deref() };

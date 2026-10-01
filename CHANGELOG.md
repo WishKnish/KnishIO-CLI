@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`knishio bench execute --no-cell-admin`** replays a plan against a remote
+  validator without psql/ssh cell administration. It skips `cell create`/`purge`
+  and never resolves the psql transport (so the CLI-2 remote guard is not hit);
+  `--cell-slug` is required and names an existing `BENCH_CLI_` cell on the
+  validator. Conflicts with `--keep`.
+
 - **`knishio init` now generates `secrets/validator_kem_secret`** (64 hex chars,
   mode 0600). The production compose requires it: the validator refuses to boot
   in production with the default ML-KEM secret. Re-running `init` on an existing

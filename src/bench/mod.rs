@@ -56,21 +56,26 @@ pub fn generate(args: generate::GenerateArgs) -> Result<()> {
 }
 
 /// Execute a benchmark plan against validator endpoint(s).
-/// Automatically creates the target cell before injection and
-/// purges it afterward unless `keep` is set.
+/// With a cell admin, creates the target cell before injection and purges it
+/// afterward unless `keep` is set. With `None` (`--no-cell-admin`) the cell
+/// must already exist on the validator and is left untouched.
 pub async fn execute(
     args: execute::ExecuteArgs,
     config: &Config,
-    cell_admin: &crate::psql::PsqlTransport,
+    cell_admin: Option<&crate::psql::PsqlTransport>,
     keep: bool,
 ) -> Result<()> {
     let _ = config; // retained for future non-cell uses
     // Resolve cell slug — always in the BENCH_CLI_ namespace for safety.
     let slug = resolve_cell_slug(args.cell_slug.as_deref())?;
 
-    // Ensure cell exists on the validator before injection
-    cell::create(cell_admin, &slug, Some("Benchmark Cell"), "active").await?;
-
+    match cell_admin {
+        // Ensure cell exists on the validator before injection
+        Some(admin) => cell::create(admin, &slug, Some("Benchmark Cell"), "active").await?,
+        None => output::info(&format!(
+            "cell admin skipped: {slug} must already exist on the validator"
+        )),
+    }
     output::info(&format!("Executing benchmark plan: {}", args.plan));
     let exec_args = execute::ExecuteArgs {
         plan: args.plan,
@@ -86,9 +91,9 @@ pub async fn execute(
     execute::execute(exec_args).await?;
 
     // Auto-cleanup benchmark data (reports already saved to disk)
-    if !keep {
+    if let (Some(admin), false) = (cell_admin, keep) {
         output::info(&format!("Cleaning up benchmark cell '{}'...", slug));
-        cell::purge(cell_admin, &slug).await?;
+        cell::purge(admin, &slug).await?;
     }
 
     Ok(())
@@ -128,7 +133,7 @@ pub async fn run(
         csv: exec_args.csv,
         insecure_tls: exec_args.insecure_tls,
     };
-    execute(exec, config, cell_admin, keep).await?;
+    execute(exec, config, Some(cell_admin), keep).await?;
 
     // Clean up temp plan file
     let _ = std::fs::remove_file(&plan_path);
@@ -156,6 +161,28 @@ pub async fn clean(cell_admin: &crate::psql::PsqlTransport, cell_slug: Option<&s
     Ok(())
 }
 
+/// Resolve the cell-admin transport for `bench execute`. With
+/// `--no-cell-admin` the psql transport is never resolved (so the CLI-2
+/// remote guard is not reached) and `--cell-slug` is mandatory.
+pub fn execute_cell_admin<F>(
+    no_cell_admin: bool,
+    cell_slug: Option<&str>,
+    resolve: F,
+) -> Result<Option<crate::psql::PsqlTransport>>
+where
+    F: FnOnce() -> Result<crate::psql::PsqlTransport>,
+{
+    if !no_cell_admin {
+        return resolve().map(Some);
+    }
+    if cell_slug.is_none() {
+        anyhow::bail!(
+            "--no-cell-admin needs --cell-slug <an existing BENCH_CLI_ cell on the validator>"
+        );
+    }
+    Ok(None)
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Internal helpers
 // ═══════════════════════════════════════════════════════════════
@@ -172,5 +199,20 @@ fn resolve_cell_slug(slug: Option<&str>) -> Result<String> {
                 .as_secs();
             Ok(format!("BENCH_CLI_{ts}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_cell_admin_never_resolves_psql() {
+        fn no_probe() -> Result<crate::psql::PsqlTransport> {
+            panic!("cell admin must not be resolved with --no-cell-admin")
+        }
+        let err = execute_cell_admin(true, None, no_probe).unwrap_err();
+        assert!(err.to_string().contains("--no-cell-admin needs --cell-slug"), "err: {err}");
+        assert!(execute_cell_admin(true, Some("BENCH_CLI_X"), no_probe).unwrap().is_none());
     }
 }
