@@ -14,6 +14,21 @@
   container and failed on every CI runner since 0.2.7. The decision table now
   lives in `resolve_with_probe` with the capability probe injected; `resolve`
   is unchanged for callers and still probes only on the local path.
+- **`cell`, `audit`, `bench` and `backup` can reach a Postgres the operator runs
+  unprivileged.** `KNISHIO_DB_TRANSPORT=direct` (or `[database] transport = "direct"`
+  in `knishio.toml`) runs plain `psql`/`pg_dump` from PATH with libpq's
+  `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSFILE` — no sudo, no Docker. For appliances where
+  the account has no sudo and Postgres runs as that user. The remote-URL refusal
+  still applies (`--local` opts in), `--host` still wins, and the default
+  auto-selection is unchanged.
+- **`bench --types meta,value-transfer` plans are accepted.** The generator
+  interleaved metas and transfers on one identity's chain, but a meta moves the
+  ContinuID pointer to a fresh position holding no token balance, so every
+  transfer after the first meta was rejected `Wallet not found` (36 of 40 in a
+  4-identity plan). Mixed plans now split identities: even identities run metas,
+  odd ones run transfers, so concurrent identities still put mixed load on the
+  validator. `--metas-per-identity` / `--transfers-per-identity` apply to the
+  identities running that type; the plan header prints the split.
 
 ## 0.2.7
 

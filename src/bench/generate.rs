@@ -40,7 +40,15 @@ struct TypeSet {
     has_value_transfer: bool,
     has_rule: bool,
     has_burn: bool,
-    needs_token_setup: bool,
+    /// `meta` + `value-transfer` together: even identities run metas, odd ones run
+    /// value transfers. One identity cannot interleave the two on a single chain:
+    /// a value transfer must sign `atoms[0]` from the funded token wallet at the
+    /// current ContinuID pointer (¶0074 Rule 3), and a meta molecule advances that
+    /// pointer to a fresh USER position that holds no token balance — every
+    /// transfer after the first meta was rejected "Wallet not found". Splitting by
+    /// identity keeps both chains valid while concurrent identities still put
+    /// mixed load on the validator.
+    split_meta_value: bool,
 }
 
 impl TypeSet {
@@ -65,14 +73,35 @@ impl TypeSet {
             has_value_transfer = false;
         }
 
-        let needs_token_setup = has_value_transfer || has_burn;
-
         Ok(TypeSet {
             has_meta,
             has_value_transfer,
             has_rule,
             has_burn,
-            needs_token_setup,
+            split_meta_value: has_meta && has_value_transfer,
+        })
+    }
+
+    /// Which of meta / value-transfer identity `k` runs in phase 2.
+    fn roles(&self, k: usize) -> (bool, bool) {
+        if self.split_meta_value {
+            let even = k.is_multiple_of(2);
+            (even, !even)
+        } else {
+            (self.has_meta, self.has_value_transfer)
+        }
+    }
+
+    /// Whether identity `k` needs a token minted in phase 1.
+    fn identity_needs_token(&self, k: usize) -> bool {
+        self.roles(k).1 || self.has_burn
+    }
+
+    /// (identities running metas, identities running value transfers).
+    fn role_counts(&self, identities: usize) -> (usize, usize) {
+        (0..identities).fold((0, 0), |(m, v), k| {
+            let (rm, rv) = self.roles(k);
+            (m + rm as usize, v + rv as usize)
         })
     }
 }
@@ -485,26 +514,19 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
 
     // Calculate expected molecule counts
     let auth_count = args.identities;
-    let setup_count = if type_set.needs_token_setup {
-        // token-create for every identity; token-request only on the burn-only
-        // path. Value transfers skip the request (the C-isotope already funds the
-        // creator and the request would advance ContinuID off the funded wallet).
-        if type_set.has_value_transfer {
-            args.identities
-        } else {
-            args.identities * 2
-        }
-    } else {
-        0
-    };
+    let (meta_ids, vt_ids) = type_set.role_counts(args.identities);
+    let token_creates = (0..args.identities)
+        .filter(|&k| type_set.identity_needs_token(k))
+        .count();
+    // token-create for every identity that needs a token; token-request only on the
+    // burn-only path. Value transfers skip the request (the C-isotope already funds
+    // the creator and the request would advance ContinuID off the funded wallet).
+    let token_requests = if type_set.has_value_transfer { 0 } else { token_creates };
+    let setup_count = token_creates + token_requests;
     let test_count = {
         let mut c = 0usize;
-        if type_set.has_meta {
-            c += args.identities * args.metas_per_identity;
-        }
-        if type_set.has_value_transfer {
-            c += args.identities * args.transfers_per_identity;
-        }
+        c += meta_ids * args.metas_per_identity;
+        c += vt_ids * args.transfers_per_identity;
         if type_set.has_rule {
             c += args.identities * args.rules_per_identity;
         }
@@ -521,19 +543,22 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
     println!("═══════════════════════════════════════════════════════════════");
     println!(" Identities:          {}", args.identities);
     println!(" Molecule types:      {}", args.types.join(", "));
+    if type_set.split_meta_value {
+        println!("   split:             {meta_ids} identities run meta, {vt_ids} run value-transfer");
+    }
     println!(" Phase 0 (auth):      {auth_count}");
     if setup_count > 0 {
         println!(" Phase 1 (setup):     {setup_count}");
-        println!("   token-create:      {}", args.identities);
-        if !type_set.has_value_transfer {
-            println!("   token-request:     {}", args.identities);
+        println!("   token-create:      {token_creates}");
+        if token_requests > 0 {
+            println!("   token-request:     {token_requests}");
         }
     }
     println!(" Phase 2 (test):      {test_count}");
     if type_set.has_meta {
         println!(
             "   meta:              {} ({} metaTypes: {})",
-            args.identities * args.metas_per_identity,
+            meta_ids * args.metas_per_identity,
             BENCH_META_TYPES.len(),
             BENCH_META_TYPES.join(", "),
         );
@@ -541,7 +566,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
     if type_set.has_value_transfer {
         println!(
             "   value-transfer:    {}",
-            args.identities * args.transfers_per_identity
+            vt_ids * args.transfers_per_identity
         );
     }
     if type_set.has_rule {
@@ -662,9 +687,10 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
         e.1 += auth_elapsed;
 
         // ── Phase 1: Token setup (if needed) ──
+        let (run_meta, run_vt) = type_set.roles(k);
         let mut token_balance = args.token_amount;
 
-        if type_set.needs_token_setup {
+        if type_set.identity_needs_token(k) {
             // token-create: mint the supply to `mint_position` AND advance the
             // ContinuID pointer to `mint_position`, so a value transfer can sign
             // atoms[0] from the funded token wallet and satisfy ¶0074 Rule 3.
@@ -747,19 +773,19 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
         }
 
         // ── Phase 2: Test molecules ──
-        let meta_count = if type_set.has_meta {
+        let meta_count = if run_meta {
             args.metas_per_identity
         } else {
             0
         };
-        let vt_count = if type_set.has_value_transfer {
+        let vt_count = if run_vt {
             args.transfers_per_identity
         } else {
             0
         };
         let max_interleave = std::cmp::max(meta_count, vt_count);
 
-        let amount_per_transfer = if type_set.has_value_transfer {
+        let amount_per_transfer = if run_vt {
             let burn_budget = if type_set.has_burn {
                 args.burns_per_identity
             } else {
@@ -776,7 +802,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
 
         for i in 0..max_interleave {
             // Meta molecule
-            if type_set.has_meta && i < meta_count {
+            if run_meta && i < meta_count {
                 let start = Instant::now();
                 let meta_type = BENCH_META_TYPES[(meta_idx + k) % BENCH_META_TYPES.len()];
                 let mol = make_meta(&secret, bundle, &next_pos, k, meta_idx, meta_type)?;
@@ -798,7 +824,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             }
 
             // Value transfer molecule
-            if type_set.has_value_transfer && i < vt_count {
+            if run_vt && i < vt_count {
                 let recipient_idx = (k + 1 + vt_idx) % args.identities;
                 let recipient_bundle = &bundles[recipient_idx];
 
@@ -875,8 +901,8 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
         }
 
         // Burn molecules
-        if type_set.has_burn && type_set.needs_token_setup {
-            let transfer_budget = if type_set.has_value_transfer {
+        if type_set.has_burn && type_set.identity_needs_token(k) {
+            let transfer_budget = if run_vt {
                 args.transfers_per_identity as f64
             } else {
                 0.0
@@ -1001,4 +1027,82 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `meta,value-transfer` plans: every value transfer must sign from the token
+    /// wallet its chain predecessor funded — the token-create (which mints to the
+    /// position it also moves the ContinuID pointer to) or the previous transfer
+    /// (whose remainder V-atom lands at the next signing position). Interleaving
+    /// metas on the same chain broke this: a meta moved the pointer to a position
+    /// with no token balance, and the validator rejected every later transfer
+    /// "Wallet not found".
+    #[test]
+    fn mixed_plan_keeps_every_value_chain_funded() {
+        let dir = std::env::temp_dir().join(format!("knishio-gen-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("plan.db");
+        generate(GenerateArgs {
+            identities: 4,
+            types: vec!["meta".into(), "value-transfer".into()],
+            metas_per_identity: 3,
+            transfers_per_identity: 3,
+            rules_per_identity: 0,
+            burns_per_identity: 0,
+            token_amount: 1000.0,
+            output: plan.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+        let conn = Connection::open(&plan).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT identity_idx, mol_type, payload_json FROM molecules ORDER BY identity_idx, chain_order")
+            .unwrap();
+        let rows: Vec<(i64, String, serde_json::Value)> = stmt
+            .query_map([], |r| {
+                let p: String = r.get(2)?;
+                Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&p).unwrap()))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let i_position = |m: &serde_json::Value| {
+            m["atoms"].as_array().unwrap().iter().rev().find(|a| a["isotope"] == "I").map(|a| a["position"].clone())
+        };
+        let (mut metas, mut transfers) = (0, 0);
+        for (i, (idx, mol_type, mol)) in rows.iter().enumerate() {
+            match mol_type.as_str() {
+                "meta" => metas += 1,
+                "value-transfer" => {
+                    transfers += 1;
+                    let signer = &mol["atoms"][0];
+                    let (prev_idx, prev_type, prev) = &rows[i - 1];
+                    assert_eq!(prev_idx, idx, "a transfer cannot open an identity's chain");
+                    let funded = match prev_type.as_str() {
+                        // Mint position == the pointer the token-create set.
+                        "token-create" => i_position(prev).as_ref() == Some(&signer["position"]),
+                        // Remainder of the same token at the signing position.
+                        "value-transfer" => prev["atoms"].as_array().unwrap().iter().any(|a| {
+                            a["isotope"] == "V" && a["token"] == signer["token"] && a["position"] == signer["position"]
+                        }),
+                        _ => false,
+                    };
+                    assert!(
+                        funded,
+                        "identity {idx}: transfer signs from {}/{} after a {prev_type}, which funded no such wallet",
+                        signer["token"], signer["position"]
+                    );
+                }
+                _ => {}
+            }
+        }
+        // Two meta identities x 3 and two value identities x 3.
+        assert_eq!((metas, transfers), (6, 6));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

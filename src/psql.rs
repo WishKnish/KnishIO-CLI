@@ -1,7 +1,8 @@
-//! psql transport: run SQL against the validator's Postgres through one of three
+//! psql transport: run SQL against the validator's Postgres through one of four
 //! mechanisms — the LOCAL docker stack (`docker exec psql`, the historical
-//! behavior), a LOCAL bare-metal Postgres (`sudo -n -u postgres psql`, CLI-7), or a
-//! REMOTE host over ssh (`ssh <host> sudo -n -u postgres psql`).
+//! behavior), a LOCAL bare-metal Postgres (`sudo -n -u postgres psql`, CLI-7), a
+//! REMOTE host over ssh (`ssh <host> sudo -n -u postgres psql`), or plain `psql`
+//! driven by the libpq environment (opt-in `direct`, for an unprivileged Postgres).
 //!
 //! This is the structural CLI-2 fix (validator repo
 //! docs/audits/TESTNET-DEPLOY-2026-07-23.md): cell/audit administration is
@@ -23,7 +24,7 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::config::Config;
+use crate::config::{Config, DbTransport};
 
 /// Default hint used for "relation does not exist"-class errors.
 const DEFAULT_MISSING_HINT: &str =
@@ -50,6 +51,12 @@ pub enum PsqlTransport {
     /// and exactly what the `(postgres) NOPASSWD: /usr/bin/psql` grant that
     /// `deploy bootstrap` already installs permits.
     LocalPsql { db: String },
+    /// Plain `psql -d <db> …` from PATH, connecting through the standard libpq
+    /// environment (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`/`PGPASSFILE`). No sudo,
+    /// no Docker: for a Postgres the operator runs unprivileged on an appliance with
+    /// no root access. Opt-in only (`KNISHIO_DB_TRANSPORT=direct`); never probed.
+    /// `host` is `PGHOST` as seen at resolve time, kept so [`is_local`] stays pure.
+    Direct { db: String, host: Option<String> },
 }
 
 /// Which local psql mechanism is usable, as observed on this machine.
@@ -131,6 +138,14 @@ impl PsqlTransport {
                 cfg.validator.url
             );
         }
+        // After the CLI-2 guard: an exported KNISHIO_DB_TRANSPORT=direct must never let
+        // a remote --url silently administer whatever PGHOST points at.
+        if cfg.database.transport == DbTransport::Direct {
+            return Ok(PsqlTransport::Direct {
+                db: cfg.database.name.clone(),
+                host: std::env::var("PGHOST").ok().filter(|h| !h.is_empty()),
+            });
+        }
         let caps = probe();
         select_local(
             caps,
@@ -202,6 +217,10 @@ impl PsqlTransport {
             PsqlTransport::LocalPsql { .. } => {
                 "local://postgres (sudo -u postgres psql — bare metal)".to_string()
             }
+            PsqlTransport::Direct { host, .. } => format!(
+                "direct://{} (psql via libpq env — no sudo)",
+                host.as_deref().unwrap_or("local socket")
+            ),
         }
     }
 
@@ -212,7 +231,11 @@ impl PsqlTransport {
     /// without the confirmation prompt (settled deliberately 2026-07-28 — read-only
     /// commands never prompted anyway). `--yes` remains available for scripts.
     pub fn is_local(&self) -> bool {
-        matches!(self, PsqlTransport::DockerExec { .. } | PsqlTransport::LocalPsql { .. })
+        match self {
+            PsqlTransport::DockerExec { .. } | PsqlTransport::LocalPsql { .. } => true,
+            PsqlTransport::Ssh { .. } => false,
+            PsqlTransport::Direct { host, .. } => direct_host_is_local(host.as_deref()),
+        }
     }
 
     /// Run SQL (via stdin) and return trimmed stdout. Errors are scrubbed to
@@ -235,6 +258,9 @@ impl PsqlTransport {
                 PsqlTransport::Ssh { .. } => "Failed to spawn ssh — is it installed?",
                 PsqlTransport::LocalPsql { .. } => {
                     "Failed to spawn sudo/psql — is a local PostgreSQL client installed?"
+                }
+                PsqlTransport::Direct { .. } => {
+                    "Failed to spawn psql — is the PostgreSQL client on PATH?"
                 }
             })?;
 
@@ -289,7 +315,8 @@ impl PsqlTransport {
         match self {
             PsqlTransport::DockerExec { db, .. }
             | PsqlTransport::Ssh { db, .. }
-            | PsqlTransport::LocalPsql { db } => db,
+            | PsqlTransport::LocalPsql { db }
+            | PsqlTransport::Direct { db, .. } => db,
         }
     }
 
@@ -319,6 +346,10 @@ impl PsqlTransport {
                     "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "sudo", "-n", "-u",
                     "postgres", "psql", "-d", db, "-q", "-t", "-A", "-f", "-",
                 ]),
+            ),
+            PsqlTransport::Direct { .. } => (
+                "psql".into(),
+                owned(&["-d", db, "-q", "-t", "-A", "-f", "-"]),
             ),
         }
     }
@@ -350,6 +381,10 @@ impl PsqlTransport {
                     "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "sudo", "-n", "-u",
                     "postgres", "pg_dump", "-d", db, "--no-owner", "--no-acl",
                 ]),
+            ),
+            PsqlTransport::Direct { db, .. } => (
+                "pg_dump".into(),
+                owned(&["-d", db, "--no-owner", "--no-acl"]),
             ),
         }
     }
@@ -394,7 +429,8 @@ impl PsqlTransport {
         match &mut t {
             PsqlTransport::DockerExec { db: d, .. }
             | PsqlTransport::Ssh { db: d, .. }
-            | PsqlTransport::LocalPsql { db: d } => *d = db.to_string(),
+            | PsqlTransport::LocalPsql { db: d }
+            | PsqlTransport::Direct { db: d, .. } => *d = db.to_string(),
         }
         t
     }
@@ -402,6 +438,15 @@ impl PsqlTransport {
     /// [`exec_with_hint`] with the default missing-relation hint.
     pub async fn exec(&self, sql: &str) -> Result<String> {
         self.exec_with_hint(sql, DEFAULT_MISSING_HINT).await
+    }
+}
+
+/// Whether a `direct` transport's `PGHOST` points at this machine: unset (libpq's
+/// default local socket), a socket directory, or a loopback name/address.
+fn direct_host_is_local(host: Option<&str>) -> bool {
+    match host {
+        None => true,
+        Some(h) => h.starts_with('/') || matches!(h, "localhost" | "127.0.0.1" | "::1"),
     }
 }
 
@@ -558,5 +603,52 @@ mod tests {
         // Remote URL + explicit --local → local path (operator opted in).
         let t = PsqlTransport::resolve_with_probe(&cfg, None, true, || caps(true, false, false)).unwrap();
         assert!(matches!(t, PsqlTransport::DockerExec { .. }), "got {t:?}");
+
+        // Direct does NOT bypass the CLI-2 guard: remote URL + direct → refusal,
+        // without probing (this is what stops an exported KNISHIO_DB_TRANSPORT=direct
+        // from silently acting on the local DB while the banner names a remote URL).
+        cfg.database.transport = DbTransport::Direct;
+        let err = PsqlTransport::resolve_with_probe(&cfg, None, false, no_probe).unwrap_err();
+        assert!(err.to_string().contains("--local"), "err: {err}");
+
+        // Remote URL + --local + direct → Direct (operator opted in), no probe. Only the
+        // variant and db are asserted: `host` comes from the caller's PGHOST.
+        let t = PsqlTransport::resolve_with_probe(&cfg, None, true, no_probe).unwrap();
+        assert!(matches!(t, PsqlTransport::Direct { .. }), "got {t:?}");
+        assert_eq!(t.db_name(), "knishio");
+
+        // Local URL + direct → Direct, no probe.
+        cfg.validator.url = "http://127.0.0.1:18080".into();
+        let t = PsqlTransport::resolve_with_probe(&cfg, None, false, no_probe).unwrap();
+        assert!(matches!(t, PsqlTransport::Direct { .. }), "got {t:?}");
+
+        // --host still wins over direct.
+        let t = PsqlTransport::resolve_with_probe(&cfg, Some("forge@h"), false, no_probe).unwrap();
+        assert!(matches!(t, PsqlTransport::Ssh { .. }), "got {t:?}");
+    }
+
+    /// The direct transport runs plain psql/pg_dump (no sudo, no -U: libpq env names the
+    /// role), and is local only when PGHOST is this machine.
+    #[test]
+    fn direct_transport_argv_and_locality() {
+        let t = PsqlTransport::Direct { db: "knishio".into(), host: Some("127.0.0.1".into()) };
+        let (p, a) = t.psql_stdin_argv("postgres");
+        assert_eq!(p, "psql");
+        assert!(a.windows(2).any(|w| w == ["-d", "postgres"]), "argv: {a:?}");
+        assert_eq!(a.last().map(String::as_str), Some("-"));
+        assert!(!a.iter().any(|s| s == "sudo"), "argv: {a:?}");
+
+        let (p, a) = t.pg_dump_argv();
+        assert_eq!(p, "pg_dump");
+        assert!(!a.iter().any(|s| s == "-U"), "argv: {a:?}");
+        assert_eq!(t.with_db("postgres").db_name(), "postgres");
+
+        for local in [None, Some("/tmp/x"), Some("127.0.0.1"), Some("localhost"), Some("::1")] {
+            assert!(direct_host_is_local(local), "{local:?} must be local");
+        }
+        assert!(!direct_host_is_local(Some("db.internal")));
+        let remote = PsqlTransport::Direct { db: "d".into(), host: Some("db.internal".into()) };
+        assert!(!remote.is_local());
+        assert!(remote.describe().contains("direct://db.internal"));
     }
 }

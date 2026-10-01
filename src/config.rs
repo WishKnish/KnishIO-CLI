@@ -89,6 +89,33 @@ pub struct AccelProfile {
 pub struct DatabaseConfig {
     pub user: String,
     pub name: String,
+    /// How database-side commands reach Postgres. `auto` keeps the probe
+    /// (docker container, then `sudo -u postgres psql`); `direct` runs plain
+    /// `psql` with the libpq env (PGHOST/PGPORT/PGUSER/PGPASSFILE) for a
+    /// Postgres the operator runs unprivileged. Env: `KNISHIO_DB_TRANSPORT`.
+    pub transport: DbTransport,
+}
+
+/// `[database] transport` — see [`DatabaseConfig::transport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbTransport {
+    #[default]
+    Auto,
+    Direct,
+}
+
+impl DbTransport {
+    /// `"auto"` | `"direct"`, case-insensitive; anything else is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("auto") {
+            Some(DbTransport::Auto)
+        } else if s.eq_ignore_ascii_case("direct") {
+            Some(DbTransport::Direct)
+        } else {
+            None
+        }
+    }
 }
 
 // ── Defaults ────────────────────────────────────────────────
@@ -133,6 +160,7 @@ impl Default for DatabaseConfig {
         Self {
             user: "knishio".into(),
             name: "knishio".into(),
+            transport: DbTransport::Auto,
         }
     }
 }
@@ -241,6 +269,14 @@ impl Config {
         }
         if let Ok(val) = std::env::var("KNISHIO_DB_NAME") {
             self.database.name = val;
+        }
+        if let Ok(val) = std::env::var("KNISHIO_DB_TRANSPORT") {
+            match DbTransport::parse(&val) {
+                Some(t) => self.database.transport = t,
+                None => output::warn(&format!(
+                    "KNISHIO_DB_TRANSPORT={val:?} is not \"auto\" or \"direct\" — ignored"
+                )),
+            }
         }
         if let Ok(val) = std::env::var("KNISHIO_INSECURE_TLS") {
             self.validator.insecure_tls =
@@ -361,4 +397,17 @@ fn find_config_file(start: &Path) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_transport_parse() {
+        assert_eq!(DbTransport::parse("direct"), Some(DbTransport::Direct));
+        assert_eq!(DbTransport::parse("DIRECT"), Some(DbTransport::Direct));
+        assert_eq!(DbTransport::parse("auto"), Some(DbTransport::Auto));
+        assert_eq!(DbTransport::parse("ssh"), None);
+    }
 }
