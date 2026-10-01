@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **`knishio init` now generates `secrets/validator_kem_secret`** (64 hex chars,
+  mode 0600). The production compose requires it: the validator refuses to boot
+  in production with the default ML-KEM secret. Re-running `init` on an existing
+  `secrets/` adds a missing `validator_kem_secret` and leaves every other file
+  untouched. jwt/db files are never backfilled because `db_url` embeds
+  `db_password`.
+
 ## 0.2.7
 
 Bug-fix release: **every database-side command now works on a bare-metal deployment** —

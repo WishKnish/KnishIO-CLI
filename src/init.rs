@@ -2,7 +2,7 @@
 //!
 //! Generates:
 //! - `knishio.toml` with production defaults
-//! - `secrets/` directory with jwt_secret, db_password, db_url
+//! - `secrets/` directory with jwt_secret, db_password, db_url, validator_kem_secret
 //! - `.env.production` from template
 //! - Self-signed TLS certificates (optional)
 
@@ -76,7 +76,7 @@ pub async fn run(
     output::info("  4. knishio full   (verify everything is healthy)");
     println!();
     output::info("Files created:");
-    output::info("  secrets/          — JWT secret + DB credentials");
+    output::info("  secrets/          — JWT + ML-KEM secrets, DB credentials");
     output::info("  knishio.toml      — CLI config (points to production compose)");
     output::info("  .env.production   — environment config");
     if generate_tls {
@@ -87,46 +87,61 @@ pub async fn run(
 }
 
 /// Generate cryptographic secrets in the secrets directory.
+///
+/// A fresh directory gets all four secrets. An existing directory keeps every
+/// file it has and only gains a missing `validator_kem_secret` (installs made
+/// before the ML-KEM guard never received one, and production refuses to boot
+/// without it). jwt/db files are never backfilled: `db_url` embeds
+/// `db_password`, so writing either alone could desync them.
 fn generate_secrets(secrets_dir: &Path) -> Result<()> {
     if secrets_dir.exists() {
-        output::warn("secrets/ already exists — skipping secret generation");
-        output::info("  Delete secrets/ and re-run to regenerate");
+        output::warn("secrets/ already exists — keeping existing secrets");
+        output::info("  Delete secrets/ and re-run to regenerate all secrets");
+        let kem_path = secrets_dir.join("validator_kem_secret");
+        if !kem_path.exists() {
+            write_secret(&kem_path, &generate_hex(64))?;
+            output::success("Added missing secrets/validator_kem_secret (ML-KEM server identity)");
+        }
         return Ok(());
     }
 
     fs::create_dir_all(secrets_dir).context("Failed to create secrets directory")?;
 
     // JWT secret: 64-char hex
-    let jwt_secret = generate_hex(64);
-    fs::write(secrets_dir.join("jwt_secret"), &jwt_secret)
-        .context("Failed to write jwt_secret")?;
+    write_secret(&secrets_dir.join("jwt_secret"), &generate_hex(64))?;
 
     // DB password: 32-char alphanumeric
     let db_password = generate_password(32);
-    fs::write(secrets_dir.join("db_password"), &db_password)
-        .context("Failed to write db_password")?;
+    write_secret(&secrets_dir.join("db_password"), &db_password)?;
 
     // DB URL: full connection string using the generated password
     let db_url = format!(
         "postgres://knishio:{}@postgres:5432/knishio",
         db_password
     );
-    fs::write(secrets_dir.join("db_url"), &db_url)
-        .context("Failed to write db_url")?;
+    write_secret(&secrets_dir.join("db_url"), &db_url)?;
 
-    // Restrict permissions (best-effort on non-Unix)
+    // ML-KEM server identity: 64-char hex, independent of the JWT secret
+    write_secret(&secrets_dir.join("validator_kem_secret"), &generate_hex(64))?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        for name in &["jwt_secret", "db_password", "db_url"] {
-            let _ = fs::set_permissions(secrets_dir.join(name), perms.clone());
-        }
-        let dir_perms = fs::Permissions::from_mode(0o700);
-        let _ = fs::set_permissions(secrets_dir, dir_perms);
+        let _ = fs::set_permissions(secrets_dir, fs::Permissions::from_mode(0o700));
     }
 
     output::success("Generated secrets in secrets/");
+    Ok(())
+}
+
+/// Write one secret file and restrict it to the owner (best-effort on non-Unix).
+fn write_secret(path: &Path, value: &str) -> Result<()> {
+    fs::write(path, value).with_context(|| format!("Failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -311,4 +326,65 @@ fn generate_password(len: usize) -> String {
             PASSWORD_CHARS[idx] as char
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("knishio-init-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn read(dir: &Path, name: &str) -> String {
+        fs::read_to_string(dir.join(name)).unwrap()
+    }
+
+    fn assert_hex64(s: &str) {
+        assert_eq!(s.len(), 64, "expected 64 chars, got {s:?}");
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()), "not hex: {s:?}");
+    }
+
+    #[test]
+    fn fresh_dir_generates_all_four_secrets() {
+        let secrets = tmpdir("fresh").join("secrets");
+        generate_secrets(&secrets).unwrap();
+
+        let kem = read(&secrets, "validator_kem_secret");
+        let jwt = read(&secrets, "jwt_secret");
+        assert_hex64(&kem);
+        assert_hex64(&jwt);
+        assert_ne!(kem, jwt, "ML-KEM identity must be independent of the JWT secret");
+        assert!(read(&secrets, "db_url").contains(&read(&secrets, "db_password")));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(secrets.join("validator_kem_secret")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn existing_dir_backfills_only_kem_secret() {
+        let secrets = tmpdir("backfill").join("secrets");
+        fs::create_dir_all(&secrets).unwrap();
+        fs::write(secrets.join("jwt_secret"), "keep-jwt").unwrap();
+        fs::write(secrets.join("db_password"), "keep-pw").unwrap();
+        fs::write(secrets.join("db_url"), "keep-url").unwrap();
+
+        generate_secrets(&secrets).unwrap();
+        assert_eq!(read(&secrets, "jwt_secret"), "keep-jwt");
+        assert_eq!(read(&secrets, "db_password"), "keep-pw");
+        assert_eq!(read(&secrets, "db_url"), "keep-url");
+        assert_hex64(&read(&secrets, "validator_kem_secret"));
+
+        fs::write(secrets.join("validator_kem_secret"), "keep-kem").unwrap();
+        generate_secrets(&secrets).unwrap();
+        assert_eq!(read(&secrets, "validator_kem_secret"), "keep-kem");
+    }
 }
