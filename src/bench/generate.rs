@@ -1111,4 +1111,60 @@ mod tests {
         assert_eq!((metas, transfers), (6, 6));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Identity 0's secret, bundle and first signing position (after its auth
+    /// molecule), derived exactly as `generate()` does for a plan's `run_id`.
+    fn identity0(run_id: u64) -> (String, String, String) {
+        let secret = format!("bench-cli-identity-0-{run_id}");
+        let bundle = Wallet::create(Some(&secret), None, "AUTH", None, None)
+            .unwrap()
+            .bundle
+            .unwrap();
+        let pos = advance_chain(&make_auth(&secret, &bundle).unwrap()).unwrap();
+        (secret, bundle, pos)
+    }
+
+    /// The id of a molecule's non-ContinuID atom (M for metas, the rule atom for rules).
+    fn signed_id(mol: &Molecule) -> String {
+        let v = serde_json::to_value(mol).unwrap();
+        v["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["isotope"] != "I" && a["metaId"].is_string())
+            .and_then(|a| a["metaId"].as_str())
+            .expect("molecule has a metaId-bearing atom")
+            .to_string()
+    }
+
+    /// Meta ownership on the validator is global (first writer's bundle), so two
+    /// plans replayed into one database without a purge must not share a metaId.
+    #[test]
+    fn plans_from_different_runs_share_no_meta_id() {
+        let ids: Vec<String> = [1u64, 2]
+            .iter()
+            .map(|&r| {
+                let (secret, bundle, pos) = identity0(r);
+                signed_id(&make_meta(&secret, &bundle, &pos, 0, 0, BENCH_META_TYPES[0], r).unwrap())
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids[0].ends_with("-1"), "{}", ids[0]);
+        assert!(ids[1].ends_with("-2"), "{}", ids[1]);
+    }
+
+    /// Rule ids follow the same global-ownership rule as metaIds.
+    #[test]
+    fn plans_from_different_runs_share_no_rule_id() {
+        let ids: Vec<String> = [1u64, 2]
+            .iter()
+            .map(|&r| {
+                let (secret, bundle, pos) = identity0(r);
+                signed_id(&make_rule(&secret, &bundle, &pos, 0, 0, BENCH_RULE_TARGETS[0], r).unwrap())
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids[0].ends_with("-1"), "{}", ids[0]);
+        assert!(ids[1].ends_with("-2"), "{}", ids[1]);
+    }
 }
