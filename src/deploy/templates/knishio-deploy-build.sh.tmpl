@@ -12,6 +12,11 @@ export CARGO_TARGET_DIR="$HOME/.cargo-target/knishio-validator"
 # dependency artifacts in $CARGO_TARGET_DIR/debug/deps, which are path-independent
 # and unaffected by this.
 export CARGO_INCREMENTAL=0
+# Validator revisions with the default `kcore` feature link a sha256-pinned
+# KnishIO-Crypto-Core package that `make fetch-kcore` puts in .kcore/current
+# (cached, so redeploys do not re-download). Guarded like deploy-gate below so
+# older revisions without the target still build.
+if make -n fetch-kcore >/dev/null 2>&1; then make fetch-kcore; fi
 cargo build --release --locked
 # Pre-deploy gate. Forge quick-deploy means every push lands here automatically,
 # so this is the last chance to stop a build that fails the repo's own gates
