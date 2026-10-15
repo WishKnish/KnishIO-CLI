@@ -7,8 +7,8 @@ type ActiveSessionResponse {
 	metaType: String!
 	metaId: String!
 	jsonData: String
-	createdAt: Int
-	updatedAt: Int
+	createdAt: DateTime
+	updatedAt: DateTime
 }
 
 """
@@ -24,13 +24,13 @@ type ActiveUser {
 	ipAddress: String
 	userAgent: String
 	jsonData: String
-	lastActive: Int
-	createdAt: Int
+	lastActive: DateTime
+	createdAt: DateTime
 	"""
 	Last-write timestamp the SDK selects as `updatedAt`. active_sessions has
 	no separate column; this mirrors `last_active` (each write bumps it).
 	"""
-	updatedAt: Int
+	updatedAt: DateTime
 }
 
 """
