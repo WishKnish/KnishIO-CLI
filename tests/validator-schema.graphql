@@ -118,6 +118,11 @@ type Atom {
 	"""
 	createdAt: DateTime!
 	"""
+	Atom version the molecule was hashed with ("4" = versioned hashing); null for
+	unversioned atoms and for atoms stored before 0.8.5
+	"""
+	version: String
+	"""
 	Token slug alias for PHP schema compatibility
 	PHP server exposes `tokenSlug` while Rust uses `token`
 	"""
@@ -1897,6 +1902,11 @@ type SyncAtom {
 	batchId: String
 	createdAt: String!
 	metasJson: String
+	"""
+	Atom version the molecule was hashed with ("4" = versioned hashing); null for
+	unversioned atoms and for atoms stored before 0.8.5
+	"""
+	version: String
 }
 
 """
