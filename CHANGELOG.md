@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.2.8
+
+Remote bench replay, a direct psql/pg_dump transport for unprivileged Postgres, and `init`
+generating every secret the production compose needs.
+
 - **`knishio bench execute --no-cell-admin`** replays a plan against a remote
   validator without psql/ssh cell administration. It skips `cell create`/`purge`
   and never resolves the psql transport (so the CLI-2 remote guard is not hit);
@@ -41,6 +46,16 @@
   odd ones run transfers, so concurrent identities still put mixed load on the
   validator. `--metas-per-identity` / `--transfers-per-identity` apply to the
   identities running that type; the plan header prints the split.
+- **The generated deploy build script fetches kcore when the validator needs it.** Before
+  `cargo build --release --locked` it runs `make fetch-kcore` if the validator's Makefile
+  has that target, so a validator built with the default `kcore` feature links the pinned
+  KnishIO-Crypto-Core package; older validator revisions without the target still build.
+- The README's `cell usage` example uses a generic cell slug.
+- **The committed `Cargo.lock` takes rustls 0.23.46, quinn-proto 0.11.19 and chacha20
+  0.10.2**, so `cargo install knishio-cli --locked` no longer builds against rustls 0.23.37
+  (RUSTSEC-2026-0285, -0346, -0348, -0349), quinn-proto 0.11.16 (RUSTSEC-2026-0338 to
+  -0342) or the yanked chacha20 0.10.1. `cargo audit` on the committed lock: no
+  vulnerabilities.
 
 ## 0.2.7
 
