@@ -71,7 +71,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # reqwest (also used here) uses internally.
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pki-types = "1"
-webpki-roots = "0.26"
+webpki-roots = "1.0.10"
 
 # TLS certificate inspection for `knishio verify` (expiry countdown)
 x509-parser = "0.16"

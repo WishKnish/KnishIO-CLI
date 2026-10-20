@@ -54,8 +54,12 @@ generating every secret the production compose needs.
 - **The committed `Cargo.lock` takes rustls 0.23.46, quinn-proto 0.11.19 and chacha20
   0.10.2**, so `cargo install knishio-cli --locked` no longer builds against rustls 0.23.37
   (RUSTSEC-2026-0285, -0346, -0348, -0349), quinn-proto 0.11.16 (RUSTSEC-2026-0338 to
-  -0342) or the yanked chacha20 0.10.1. `cargo audit` on the committed lock: no
-  vulnerabilities.
+  -0342) or the yanked chacha20 0.10.1.
+- **TLS no longer trusts the distrusted emSign intermediates** (CVE-2026-111943). The bundled
+  roots used by the HTTP client and the `watch` WebSocket client move to webpki-roots 1.0.10
+  (RUSTSEC-2026-0381; the direct dependency leaves the 0.26 shim), and certificate
+  verification takes rustls-webpki 0.103.16 (RUSTSEC-2026-0382). `cargo audit` on the
+  committed lock: no vulnerabilities.
 
 ## 0.2.7
 
