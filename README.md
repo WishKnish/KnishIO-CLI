@@ -625,7 +625,7 @@ Cell usage
 SLUG                      QUERIES/24h    MUTNS/24h   TOKENS    RULES    METAS
 ----------------------------------------------------------------------------
 public                              0            0        6        0       10
-TOVA                                0            0        0        0        2
+partner-pilot                       0            0        0        0        2
 ```
 
 Reads the `cells` resource counters directly via `psql` (`query_count_24h` / `mutation_count_24h` / `token_count` / `rule_count` / `meta_count`), so it needs DB access — the same connection the other `cell` / `backup` / `psql` subcommands use — not the HTTP API.
