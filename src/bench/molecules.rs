@@ -18,7 +18,7 @@ pub(crate) fn next_position(mol: &Molecule) -> Result<String> {
 
 /// Create an auth molecule (U+I). Auto-adds I-atom.
 pub(crate) fn make_auth(secret: &str, bundle: &str, cell_slug: &str) -> Result<Molecule> {
-    let auth_wallet = Wallet::create(Some(secret), None, "AUTH", None, None)
+    let auth_wallet = Wallet::create(Some(secret), None, "AUTH", None, None, None)
         .context("Failed to create auth wallet")?;
 
     let mut mol = Molecule::with_params(
@@ -48,7 +48,7 @@ pub(crate) fn make_meta_custom(
     meta_id: &str,
     metas: Vec<MetaItem>,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None)
+    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None, None)
         .context("Failed to create meta wallet")?;
 
     let mut mol = Molecule::with_params(

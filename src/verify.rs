@@ -140,7 +140,7 @@ async fn write_smoke(
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let secret = format!("{:0>128}", format!("knishio-verify-smoke-{:x}", nonce));
-    let auth_wallet = Wallet::create(Some(&secret), None, "AUTH", None, None)
+    let auth_wallet = Wallet::create(Some(&secret), None, "AUTH", None, None, None)
         .map_err(|e| anyhow::anyhow!("wallet create failed: {e}"))?;
     let bundle = auth_wallet
         .bundle

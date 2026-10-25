@@ -169,7 +169,7 @@ fn advance_chain(mol: &Molecule) -> Result<String> {
 /// signer re-derives the key from `secret + position + token` when signing.
 /// Used to thread the value-transfer ContinuID/token chain (see `make_value_transfer`).
 fn fresh_position(secret: &str) -> Result<String> {
-    Wallet::create(Some(secret), None, "USER", None, None)
+    Wallet::create(Some(secret), None, "USER", None, None, None)
         .context("Failed to derive fresh position wallet")?
         .position
         .context("Derived wallet has no position")
@@ -275,18 +275,18 @@ fn make_token_create(
     token_slug: &str,
     amount: f64,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(source_position), None)
+    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(source_position), None, None)
         .context("Failed to create token-create wallet")?;
 
     // Mint the initial supply to the token wallet at `mint_position`.
     let recipient_wallet =
-        Wallet::create(Some(secret), None, token_slug, Some(mint_position), None)
+        Wallet::create(Some(secret), None, token_slug, Some(mint_position), None, None)
             .context("Failed to create token recipient wallet")?;
 
     // Force the ContinuID I-atom (USER remainder) to `mint_position` too, so the
     // post-create ContinuID pointer == the funded token wallet position.
     // `add_continuid_atom` keeps a remainder that is already a USER wallet.
-    let continuid_remainder = Wallet::create(Some(secret), None, "USER", Some(mint_position), None)
+    let continuid_remainder = Wallet::create(Some(secret), None, "USER", Some(mint_position), None, None)
         .context("Failed to create token-create ContinuID remainder wallet")?;
 
     let mut mol = Molecule::with_params(
@@ -328,7 +328,7 @@ fn make_token_request(
     amount: f64,
     identity_idx: usize,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None)
+    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None, None)
         .context("Failed to create token-request wallet")?;
 
     let mut mol = Molecule::with_params(
@@ -384,16 +384,16 @@ fn make_value_transfer(
     source_balance: f64,
     transfer_idx: usize,
 ) -> Result<Molecule> {
-    let mut source_wallet = Wallet::create(Some(secret), None, token_slug, Some(position), None)
+    let mut source_wallet = Wallet::create(Some(secret), None, token_slug, Some(position), None, None)
         .context("Failed to create value-transfer source wallet")?;
     source_wallet.balance = source_balance.to_string();
 
-    let recipient_wallet = Wallet::create(Some(recipient_bundle), None, token_slug, None, None)
+    let recipient_wallet = Wallet::create(Some(recipient_bundle), None, token_slug, None, None, None)
         .context("Failed to create value-transfer recipient wallet")?;
 
     // Token remainder lands at `next_position` (same token). `init_value` reads
     // `self.remainder_wallet` for the remainder V-atom, so set it up front.
-    let token_remainder = Wallet::create(Some(secret), None, token_slug, Some(next_position), None)
+    let token_remainder = Wallet::create(Some(secret), None, token_slug, Some(next_position), None, None)
         .context("Failed to create value-transfer token-remainder wallet")?;
 
     let mut mol = Molecule::with_params(
@@ -421,7 +421,7 @@ fn make_value_transfer(
     // remainder just landed at. This keeps the next transfer's atoms[0].position
     // (== `next_position`) equal to both the ContinuID pointer and the balance.
     mol.remainder_wallet = Some(
-        Wallet::create(Some(secret), None, "USER", Some(next_position), None)
+        Wallet::create(Some(secret), None, "USER", Some(next_position), None, None)
             .context("Failed to create value-transfer ContinuID remainder wallet")?,
     );
 
@@ -445,7 +445,7 @@ fn make_rule(
     rule_target: &str,
     run_id: u64,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None)
+    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None, None)
         .context("Failed to create rule wallet")?;
 
     let mut mol = Molecule::with_params(
@@ -486,7 +486,7 @@ fn make_burn(
     source_balance: f64,
 ) -> Result<Molecule> {
     let mut source_wallet =
-        Wallet::create(Some(secret), None, token_slug, Some(position), None)
+        Wallet::create(Some(secret), None, token_slug, Some(position), None, None)
             .context("Failed to create burn wallet")?;
     source_wallet.balance = source_balance.to_string();
 
@@ -651,7 +651,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
     // First pass: generate identities and collect bundles
     for k in 0..args.identities {
         let secret = format!("bench-cli-identity-{k}-{run_id}");
-        let auth_wallet = Wallet::create(Some(&secret), None, "AUTH", None, None)
+        let auth_wallet = Wallet::create(Some(&secret), None, "AUTH", None, None, None)
             .context("Failed to create auth wallet for bundle lookup")?;
         let bundle = auth_wallet
             .bundle
@@ -1116,7 +1116,7 @@ mod tests {
     /// molecule), derived exactly as `generate()` does for a plan's `run_id`.
     fn identity0(run_id: u64) -> (String, String, String) {
         let secret = format!("bench-cli-identity-0-{run_id}");
-        let bundle = Wallet::create(Some(&secret), None, "AUTH", None, None)
+        let bundle = Wallet::create(Some(&secret), None, "AUTH", None, None, None)
             .unwrap()
             .bundle
             .unwrap();

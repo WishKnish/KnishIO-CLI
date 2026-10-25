@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **knishio-client 2.2.0** (was 0.9.3). `Wallet::create` takes the ML-KEM
+  parameter set; the CLI passes `None` (ML-KEM-1024). Bench and smoke molecules
+  stay OTS v1 (standalone wallets).
+- **Bench workload change: wallet keys are now ML-KEM-1024.** 0.9.3 always
+  generated ML-KEM-768 keys (1184-byte public key); 2.2.0's default is
+  ML-KEM-1024 (1568 bytes). The remainder wallet's key rides in every bench
+  molecule's ContinuID I-atom, so each signed molecule is about 520 base64
+  characters larger. PERF-2 results from a validator kit built with this CLI
+  are a new baseline, not comparable with runs that used CLI 0.2.8 or earlier.
+
 ## 0.2.8
 
 Remote bench replay, a direct psql/pg_dump transport for unprivileged Postgres, and `init`
