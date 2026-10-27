@@ -4,7 +4,7 @@
 //! existing open cell (default `public`).
 
 use anyhow::{Context, Result};
-use knishio_client::{MetaItem, Molecule, Wallet};
+use knishio_client::{MetaItem, Molecule, OtsVersion, Wallet};
 
 /// Extract the next ContinuID position from a molecule's remainder wallet.
 pub(crate) fn next_position(mol: &Molecule) -> Result<String> {
@@ -17,17 +17,18 @@ pub(crate) fn next_position(mol: &Molecule) -> Result<String> {
 }
 
 /// Create an auth molecule (U+I). Auto-adds I-atom.
-pub(crate) fn make_auth(secret: &str, bundle: &str, cell_slug: &str) -> Result<Molecule> {
-    let auth_wallet = Wallet::create(Some(secret), None, "AUTH", None, None, None)
+pub(crate) fn make_auth(secret: &str, bundle: &str, cell_slug: &str, ots: OtsVersion) -> Result<Molecule> {
+    let auth_wallet = Wallet::create_with_ots_version(Some(secret), None, "AUTH", None, None, None, ots)
         .context("Failed to create auth wallet")?;
 
-    let mut mol = Molecule::with_params(
+    let mut mol = Molecule::with_params_and_min_ots_version(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(auth_wallet),
         None,
         Some(cell_slug.to_string()),
         None,
+        ots,
     );
 
     mol.init_authorization(vec![MetaItem::new("pubkey", "bench-pubkey")])
@@ -47,17 +48,19 @@ pub(crate) fn make_meta_custom(
     meta_type: &str,
     meta_id: &str,
     metas: Vec<MetaItem>,
+    ots: OtsVersion,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None, None)
+    let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(position), None, None, ots)
         .context("Failed to create meta wallet")?;
 
-    let mut mol = Molecule::with_params(
+    let mut mol = Molecule::with_params_and_min_ots_version(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
         None,
         Some(cell_slug.to_string()),
         None,
+        ots,
     );
 
     mol.init_meta(metas, meta_type, meta_id, None)

@@ -148,7 +148,7 @@ async fn write_smoke(
         .ok_or_else(|| anyhow::anyhow!("auth wallet has no bundle"))?;
 
     // 1. U-isotope auth → token.
-    let auth_mol = crate::bench::molecules::make_auth(&secret, &bundle, cell_slug)?;
+    let auth_mol = crate::bench::molecules::make_auth(&secret, &bundle, cell_slug, knishio_client::OtsVersion::V1)?;
     let next_pos = crate::bench::molecules::next_position(&auth_mol)?;
     let auth_resp = propose(client, base, &auth_mol, None).await?;
     let token = auth_resp
@@ -184,6 +184,7 @@ async fn write_smoke(
         "KNISHIO_VERIFY_SMOKE",
         &meta_id,
         vec![knishio_client::MetaItem::new("verifiedBy", "knishio verify --write-smoke")],
+        knishio_client::OtsVersion::V1,
     )?;
     let meta_resp = propose(client, base, &meta_mol, token.as_deref()).await?;
     let meta_status = meta_resp

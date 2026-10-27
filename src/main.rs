@@ -912,6 +912,10 @@ enum BenchCommands {
         /// Keep benchmark data in DB after execution (default: auto-cleanup)
         #[arg(long)]
         keep: bool,
+
+        /// OTS version the plan's wallets sign with (1 = 16 chains, 2 = 64 chains)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+        ots_version: u8,
     },
 
     /// Generate a benchmark plan file
@@ -947,6 +951,10 @@ enum BenchCommands {
         /// Output plan file path
         #[arg(short, long)]
         output: String,
+
+        /// OTS version the plan's wallets sign with (1 = 16 chains, 2 = 64 chains)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+        ots_version: u8,
     },
 
     /// Execute an existing benchmark plan
@@ -1528,6 +1536,7 @@ async fn main() -> Result<()> {
                 concurrency,
                 cell_slug,
                 keep,
+                ots_version,
             } => {
                 let gen_args = bench::generate::GenerateArgs {
                     identities,
@@ -1538,6 +1547,7 @@ async fn main() -> Result<()> {
                     burns_per_identity,
                     token_amount,
                     output: String::new(), // filled by run()
+                    ots_version: if ots_version == 2 { knishio_client::OtsVersion::V2 } else { knishio_client::OtsVersion::V1 },
                 };
                 let host_eff = if local { None } else { host.as_deref() };
                 let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
@@ -1566,6 +1576,7 @@ async fn main() -> Result<()> {
                 burns_per_identity,
                 token_amount,
                 output: output_path,
+                ots_version,
             } => {
                 let gen_args = bench::generate::GenerateArgs {
                     identities,
@@ -1576,6 +1587,7 @@ async fn main() -> Result<()> {
                     burns_per_identity,
                     token_amount,
                     output: output_path,
+                    ots_version: if ots_version == 2 { knishio_client::OtsVersion::V2 } else { knishio_client::OtsVersion::V1 },
                 };
                 bench::generate(gen_args)?;
                 output::success("Plan generation complete");

@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use knishio_client::{MetaItem, Molecule, Wallet};
+use knishio_client::{MetaItem, Molecule, OtsVersion, Wallet};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -27,6 +27,8 @@ pub struct GenerateArgs {
     pub burns_per_identity: usize,
     pub token_amount: f64,
     pub output: String,
+    /// OTS version every plan wallet signs with (`--ots-version`, default 1).
+    pub ots_version: OtsVersion,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -219,8 +221,8 @@ fn insert_mol(
 // ═══════════════════════════════════════════════════════════════
 
 /// Create an auth molecule (U+I). Auto-adds I-atom.
-fn make_auth(secret: &str, bundle: &str) -> Result<Molecule> {
-    super::molecules::make_auth(secret, bundle, FIXTURE_CELL_SLUG)
+fn make_auth(secret: &str, bundle: &str, ots: OtsVersion) -> Result<Molecule> {
+    super::molecules::make_auth(secret, bundle, FIXTURE_CELL_SLUG, ots)
 }
 
 /// Create a meta molecule (M+I). Auto-adds I-atom.
@@ -236,6 +238,7 @@ fn make_meta(
     meta_idx: usize,
     meta_type: &str,
     run_id: u64,
+    ots: OtsVersion,
 ) -> Result<Molecule> {
     let type_seq = meta_idx / BENCH_META_TYPES.len();
     let id_slot = type_seq % META_IDS_PER_TYPE;
@@ -253,6 +256,7 @@ fn make_meta(
             MetaItem::new("identity", identity_idx.to_string()),
             MetaItem::new("metaType", meta_type),
         ],
+        ots,
     )
 }
 
@@ -274,28 +278,30 @@ fn make_token_create(
     mint_position: &str,
     token_slug: &str,
     amount: f64,
+    ots: OtsVersion,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(source_position), None, None)
+    let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(source_position), None, None, ots)
         .context("Failed to create token-create wallet")?;
 
     // Mint the initial supply to the token wallet at `mint_position`.
     let recipient_wallet =
-        Wallet::create(Some(secret), None, token_slug, Some(mint_position), None, None)
+        Wallet::create_with_ots_version(Some(secret), None, token_slug, Some(mint_position), None, None, ots)
             .context("Failed to create token recipient wallet")?;
 
     // Force the ContinuID I-atom (USER remainder) to `mint_position` too, so the
     // post-create ContinuID pointer == the funded token wallet position.
     // `add_continuid_atom` keeps a remainder that is already a USER wallet.
-    let continuid_remainder = Wallet::create(Some(secret), None, "USER", Some(mint_position), None, None)
+    let continuid_remainder = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(mint_position), None, None, ots)
         .context("Failed to create token-create ContinuID remainder wallet")?;
 
-    let mut mol = Molecule::with_params(
+    let mut mol = Molecule::with_params_and_min_ots_version(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
         Some(continuid_remainder),
         Some(FIXTURE_CELL_SLUG.to_string()),
         None,
+        ots,
     );
 
     mol.init_token_creation(
@@ -327,17 +333,19 @@ fn make_token_request(
     token_slug: &str,
     amount: f64,
     identity_idx: usize,
+    ots: OtsVersion,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None, None)
+    let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(position), None, None, ots)
         .context("Failed to create token-request wallet")?;
 
-    let mut mol = Molecule::with_params(
+    let mut mol = Molecule::with_params_and_min_ots_version(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
         None,
         Some(FIXTURE_CELL_SLUG.to_string()),
         None,
+        ots,
     );
 
     let meta_id = format!("bench-request-{identity_idx}");
@@ -383,26 +391,28 @@ fn make_value_transfer(
     amount: f64,
     source_balance: f64,
     transfer_idx: usize,
+    ots: OtsVersion,
 ) -> Result<Molecule> {
-    let mut source_wallet = Wallet::create(Some(secret), None, token_slug, Some(position), None, None)
+    let mut source_wallet = Wallet::create_with_ots_version(Some(secret), None, token_slug, Some(position), None, None, ots)
         .context("Failed to create value-transfer source wallet")?;
     source_wallet.balance = source_balance.to_string();
 
-    let recipient_wallet = Wallet::create(Some(recipient_bundle), None, token_slug, None, None, None)
+    let recipient_wallet = Wallet::create_with_ots_version(Some(recipient_bundle), None, token_slug, None, None, None, ots)
         .context("Failed to create value-transfer recipient wallet")?;
 
     // Token remainder lands at `next_position` (same token). `init_value` reads
     // `self.remainder_wallet` for the remainder V-atom, so set it up front.
-    let token_remainder = Wallet::create(Some(secret), None, token_slug, Some(next_position), None, None)
+    let token_remainder = Wallet::create_with_ots_version(Some(secret), None, token_slug, Some(next_position), None, None, ots)
         .context("Failed to create value-transfer token-remainder wallet")?;
 
-    let mut mol = Molecule::with_params(
+    let mut mol = Molecule::with_params_and_min_ots_version(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
         Some(token_remainder),
         Some(FIXTURE_CELL_SLUG.to_string()),
         None,
+        ots,
     );
 
     // I-atom previousPosition = the position being consumed (current ContinuID).
@@ -421,7 +431,7 @@ fn make_value_transfer(
     // remainder just landed at. This keeps the next transfer's atoms[0].position
     // (== `next_position`) equal to both the ContinuID pointer and the balance.
     mol.remainder_wallet = Some(
-        Wallet::create(Some(secret), None, "USER", Some(next_position), None, None)
+        Wallet::create_with_ots_version(Some(secret), None, "USER", Some(next_position), None, None, ots)
             .context("Failed to create value-transfer ContinuID remainder wallet")?,
     );
 
@@ -444,17 +454,19 @@ fn make_rule(
     rule_idx: usize,
     rule_target: &str,
     run_id: u64,
+    ots: OtsVersion,
 ) -> Result<Molecule> {
-    let source_wallet = Wallet::create(Some(secret), None, "USER", Some(position), None, None)
+    let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(position), None, None, ots)
         .context("Failed to create rule wallet")?;
 
-    let mut mol = Molecule::with_params(
+    let mut mol = Molecule::with_params_and_min_ots_version(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
         None,
         Some(FIXTURE_CELL_SLUG.to_string()),
         None,
+        ots,
     );
 
     let rule_id = format!("bench-rule-{rule_target}-{identity_idx}-{rule_idx}-{run_id}");
@@ -484,19 +496,21 @@ fn make_burn(
     token_slug: &str,
     amount: f64,
     source_balance: f64,
+    ots: OtsVersion,
 ) -> Result<Molecule> {
     let mut source_wallet =
-        Wallet::create(Some(secret), None, token_slug, Some(position), None, None)
+        Wallet::create_with_ots_version(Some(secret), None, token_slug, Some(position), None, None, ots)
             .context("Failed to create burn wallet")?;
     source_wallet.balance = source_balance.to_string();
 
-    let mut mol = Molecule::with_params(
+    let mut mol = Molecule::with_params_and_min_ots_version(
         Some(secret.to_string()),
         Some(bundle.to_string()),
         Some(source_wallet),
         None,
         Some(FIXTURE_CELL_SLUG.to_string()),
         None,
+        ots,
     );
 
     mol.burn_token(amount, None)
@@ -675,7 +689,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
 
         // ── Phase 0: Auth ──
         let phase_start = Instant::now();
-        let auth_mol = make_auth(&secret, bundle)?;
+        let auth_mol = make_auth(&secret, bundle, args.ots_version)?;
         let mut next_pos = advance_chain(&auth_mol)?;
         let (hash, payload) = mol_to_payload(&auth_mol)?;
         insert_mol(&conn, k, 0, chain_order, global_order, "auth", &hash, &payload)?;
@@ -709,6 +723,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                 &mint_position,
                 &token_slug,
                 args.token_amount,
+                args.ots_version,
             )?;
             next_pos = mint_position; // ContinuID pointer now == the funded token wallet
             let (hash, payload) = mol_to_payload(&tc_mol)?;
@@ -749,6 +764,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                     &token_slug,
                     args.token_amount,
                     k,
+                    args.ots_version,
                 )?;
                 next_pos = advance_chain(&tr_mol)?;
                 let (hash, payload) = mol_to_payload(&tr_mol)?;
@@ -811,7 +827,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             if run_meta && i < meta_count {
                 let start = Instant::now();
                 let meta_type = BENCH_META_TYPES[(meta_idx + k) % BENCH_META_TYPES.len()];
-                let mol = make_meta(&secret, bundle, &next_pos, k, meta_idx, meta_type, run_id)?;
+                let mol = make_meta(&secret, bundle, &next_pos, k, meta_idx, meta_type, run_id, args.ots_version)?;
                 next_pos = advance_chain(&mol)?;
                 let (hash, payload) = mol_to_payload(&mol)?;
                 insert_mol(&conn, k, 2, chain_order, global_order, "meta", &hash, &payload)?;
@@ -850,6 +866,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                     amount_per_transfer,
                     token_balance,
                     vt_idx,
+                    args.ots_version,
                 )?;
                 next_pos = next;
                 token_balance -= amount_per_transfer;
@@ -886,7 +903,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             for r in 0..args.rules_per_identity {
                 let start = Instant::now();
                 let rule_target = BENCH_RULE_TARGETS[r % BENCH_RULE_TARGETS.len()];
-                let mol = make_rule(&secret, bundle, &next_pos, k, r, rule_target, run_id)?;
+                let mol = make_rule(&secret, bundle, &next_pos, k, r, rule_target, run_id, args.ots_version)?;
                 next_pos = advance_chain(&mol)?;
                 let (hash, payload) = mol_to_payload(&mol)?;
                 insert_mol(
@@ -925,6 +942,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                     &token_slug,
                     burn_amount,
                     token_balance,
+                    args.ots_version,
                 )?;
                 next_pos = advance_chain(&mol)?;
                 token_balance -= burn_amount;
@@ -1061,6 +1079,7 @@ mod tests {
             burns_per_identity: 0,
             token_amount: 1000.0,
             output: plan.to_string_lossy().into_owned(),
+            ots_version: OtsVersion::V1,
         })
         .unwrap();
 
@@ -1112,6 +1131,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `--ots-version 2` must reach every signer in the plan — auth, token-create, meta and
+    /// value transfer — not only the first wallet: one builder left on v1 would silently
+    /// benchmark the 16-chain signature. A molecule's OTS signature is split across its
+    /// atoms' `otsFragment`s and totals 128 hex characters per chain.
+    #[test]
+    fn ots_v2_plan_signs_every_molecule_with_64_chains() {
+        let dir = std::env::temp_dir().join(format!("knishio-gen-otsv2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("plan.db");
+        generate(GenerateArgs {
+            identities: 2,
+            types: vec!["meta".into(), "value-transfer".into()],
+            metas_per_identity: 2,
+            transfers_per_identity: 2,
+            rules_per_identity: 0,
+            burns_per_identity: 0,
+            token_amount: 1000.0,
+            output: plan.to_string_lossy().into_owned(),
+            ots_version: OtsVersion::V2,
+        })
+        .unwrap();
+
+        let conn = Connection::open(&plan).unwrap();
+        let mut stmt = conn.prepare("SELECT mol_type, payload_json FROM molecules").unwrap();
+        let rows: Vec<(String, usize)> = stmt
+            .query_map([], |r| {
+                let p: String = r.get(1)?;
+                let mol: serde_json::Value = serde_json::from_str(&p).unwrap();
+                let chars = mol["atoms"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|a| a["otsFragment"].as_str())
+                    .map(str::len)
+                    .sum();
+                Ok((r.get(0)?, chars))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let types: std::collections::BTreeSet<&str> = rows.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            types,
+            ["auth", "meta", "token-create", "value-transfer"].into_iter().collect(),
+            "plan must cover every signer kind this test guards"
+        );
+        for (mol_type, chars) in &rows {
+            assert_eq!(*chars, 64 * 128, "{mol_type} signed with {chars} hex chars, not OTS v2");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Identity 0's secret, bundle and first signing position (after its auth
     /// molecule), derived exactly as `generate()` does for a plan's `run_id`.
     fn identity0(run_id: u64) -> (String, String, String) {
@@ -1120,7 +1193,7 @@ mod tests {
             .unwrap()
             .bundle
             .unwrap();
-        let pos = advance_chain(&make_auth(&secret, &bundle).unwrap()).unwrap();
+        let pos = advance_chain(&make_auth(&secret, &bundle, OtsVersion::V1).unwrap()).unwrap();
         (secret, bundle, pos)
     }
 
@@ -1145,7 +1218,7 @@ mod tests {
             .iter()
             .map(|&r| {
                 let (secret, bundle, pos) = identity0(r);
-                signed_id(&make_meta(&secret, &bundle, &pos, 0, 0, BENCH_META_TYPES[0], r).unwrap())
+                signed_id(&make_meta(&secret, &bundle, &pos, 0, 0, BENCH_META_TYPES[0], r, OtsVersion::V1).unwrap())
             })
             .collect();
         assert_ne!(ids[0], ids[1]);
@@ -1160,7 +1233,7 @@ mod tests {
             .iter()
             .map(|&r| {
                 let (secret, bundle, pos) = identity0(r);
-                signed_id(&make_rule(&secret, &bundle, &pos, 0, 0, BENCH_RULE_TARGETS[0], r).unwrap())
+                signed_id(&make_rule(&secret, &bundle, &pos, 0, 0, BENCH_RULE_TARGETS[0], r, OtsVersion::V1).unwrap())
             })
             .collect();
         assert_ne!(ids[0], ids[1]);

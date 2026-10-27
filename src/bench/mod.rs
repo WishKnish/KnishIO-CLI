@@ -119,6 +119,7 @@ pub async fn run(
         burns_per_identity: gen_args.burns_per_identity,
         token_amount: gen_args.token_amount,
         output: plan_path.clone(),
+        ots_version: gen_args.ots_version,
     };
     generate::generate(gen)?;
 
