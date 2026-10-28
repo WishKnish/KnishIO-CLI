@@ -12,6 +12,11 @@ export CARGO_TARGET_DIR="$HOME/.cargo-target/knishio-validator"
 # dependency artifacts in $CARGO_TARGET_DIR/debug/deps, which are path-independent
 # and unaffected by this.
 export CARGO_INCREMENTAL=0
+# Bound the dev-profile cache before each build: the prune script wipes
+# $CARGO_TARGET_DIR/debug only when free space is below MIN_FREE_GB, never the
+# release profile. Each gated deploy adds ~12 GB; the weekly timer alone let it
+# reach 117 GB on the 150 GB testnet disk.
+if [ -x /usr/local/bin/cargo-target-prune.sh ]; then MIN_FREE_GB=40 /usr/local/bin/cargo-target-prune.sh; fi
 # Validator revisions with the default `kcore` feature link a sha256-pinned
 # KnishIO-Crypto-Core package that `make fetch-kcore` puts in .kcore/current
 # (cached, so redeploys do not re-download). Guarded like deploy-gate below so
