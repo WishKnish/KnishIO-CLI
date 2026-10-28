@@ -216,16 +216,18 @@ fn forge_pair_invariants() {
         incr < b.find("cargo build --release").unwrap(),
         "CARGO_INCREMENTAL=0 must be exported before the build it applies to"
     );
-    // Each gated deploy adds ~12 GB of dev-profile artifacts; the weekly prune timer alone
-    // let them reach 117 GB. The build must bound the cache before it refills it.
+    // Each gated deploy adds ~12 GB of dev-profile artifacts. The cache is bounded AFTER the
+    // binary swap: a prune before the build makes that deploy's gate build cold, which can
+    // exceed Forge's ~10-minute limit and leave the old binary running.
     let prune = b
         .find("/usr/local/bin/cargo-target-prune.sh")
-        .expect("build script must bound the dev-profile cache before building");
+        .expect("build script must bound the dev-profile cache");
     assert!(
-        prune < b.find("cargo build --release").unwrap(),
-        "the prune must run before the build that refills the cache"
+        prune > b.find("/usr/local/bin/upgrade.sh").unwrap(),
+        "the prune must run after the swap, off the deploy path"
     );
     assert!(b.contains("MIN_FREE_GB=40"));
+    assert!(b.contains("setsid nohup make deploy-gate"), "a wiped cache is rebuilt in the background");
     assert!(b.contains("/usr/local/bin/upgrade.sh"));
     assert!(b.contains("knishio-Cargo.lock.pinned"), "F-12 interim line expected without --lock-committed");
 

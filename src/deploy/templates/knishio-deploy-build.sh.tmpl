@@ -12,11 +12,6 @@ export CARGO_TARGET_DIR="$HOME/.cargo-target/knishio-validator"
 # dependency artifacts in $CARGO_TARGET_DIR/debug/deps, which are path-independent
 # and unaffected by this.
 export CARGO_INCREMENTAL=0
-# Bound the dev-profile cache before each build: the prune script wipes
-# $CARGO_TARGET_DIR/debug only when free space is below MIN_FREE_GB, never the
-# release profile. Each gated deploy adds ~12 GB; the weekly timer alone let it
-# reach 117 GB on the 150 GB testnet disk.
-if [ -x /usr/local/bin/cargo-target-prune.sh ]; then MIN_FREE_GB=40 /usr/local/bin/cargo-target-prune.sh; fi
 # Validator revisions with the default `kcore` feature link a sha256-pinned
 # KnishIO-Crypto-Core package that `make fetch-kcore` puts in .kcore/current
 # (cached, so redeploys do not re-download). Guarded like deploy-gate below so
@@ -39,3 +34,14 @@ else
   echo "NOTE: this validator revision has no 'make deploy-gate' target — skipping gate"
 fi
 sudo /usr/local/bin/upgrade.sh "$CARGO_TARGET_DIR/release/knishio-validator"
+# Bound the dev-profile cache AFTER the swap, never on the deploy path: each gated
+# deploy adds ~12 GB, and a deploy that starts with a wiped cache can exceed Forge's
+# ~10-minute limit. The prune wipes $CARGO_TARGET_DIR/debug only below MIN_FREE_GB and
+# never the release profile; if it wiped, rebuild the cache in the background so the
+# next deploy's gate starts warm. Neither step can fail an already-swapped deploy.
+if [ -x /usr/local/bin/cargo-target-prune.sh ]; then
+  MIN_FREE_GB=40 /usr/local/bin/cargo-target-prune.sh || true
+  if [ ! -d "$CARGO_TARGET_DIR/debug" ] && make -n deploy-gate >/dev/null 2>&1; then
+    setsid nohup make deploy-gate > "$HOME/warm-debug.log" 2>&1 < /dev/null &
+  fi
+fi
