@@ -48,6 +48,13 @@ pub(crate) struct ExecResult {
     /// stores it per identity and attaches it as `X-Auth-Token` on that
     /// identity's subsequent non-U molecules (required under HIGH-1).
     pub token: Option<String>,
+    /// The validator answered with GraphQL error code `VALIDATOR_TRANSIENT`: a
+    /// fault before the molecule was recorded, or after it with the pre-insert
+    /// undone. When the validator could not undo it (the row is left for its
+    /// stale-pending sweep) a resend is answered as a rejection, counted as one.
+    pub transient: bool,
+    /// Transient answers that `inject_with_retry` resent this molecule after.
+    pub retries: u32,
 }
 
 struct Stats {
@@ -57,6 +64,8 @@ struct Stats {
     errors: usize,
     latencies: Vec<u64>,
     total_ms: u64,
+    transient_retries: u64,
+    transient_failures: u64,
 }
 
 impl Stats {
@@ -68,12 +77,16 @@ impl Stats {
             errors: 0,
             latencies: Vec::new(),
             total_ms: 0,
+            transient_retries: 0,
+            transient_failures: 0,
         }
     }
 
     fn record(&mut self, result: &ExecResult) {
         self.count += 1;
         self.latencies.push(result.latency_ms);
+        self.transient_retries += u64::from(result.retries);
+        self.transient_failures += u64::from(result.transient);
         match result.validator_status.as_str() {
             "accepted" => self.accepted += 1,
             "rejected" => self.rejected += 1,
@@ -140,6 +153,40 @@ impl Stats {
 // HTTP Injection
 // ═══════════════════════════════════════════════════════════════
 
+/// GraphQL `extensions.code` of the validator's retryable fault.
+const TRANSIENT_CODE: &str = "VALIDATOR_TRANSIENT";
+/// Resends of one molecule after transient answers (backoff 50, 100, 200 ms).
+const TRANSIENT_MAX_RETRIES: u32 = 3;
+
+/// `inject_molecule`, resending the molecule while the validator answers
+/// `VALIDATOR_TRANSIENT`. A molecule that is never accepted leaves the identity's
+/// next molecule signing from a remainder position the ledger never recorded, so
+/// the rest of that chain fails "Wallet not found". The resends recover a brief
+/// fault; one that outlasts the backoff (about 350 ms in total) is reported as a
+/// transient failure. `latency_ms` is the total across attempts and backoff.
+async fn inject_with_retry(
+    client: &reqwest::Client,
+    endpoint: &str,
+    mol_json: serde_json::Value,
+    mol_type: String,
+    phase: i32,
+    token: Option<&str>,
+) -> ExecResult {
+    let start = Instant::now();
+    let mut retries = 0;
+    let mut result =
+        inject_molecule(client, endpoint, mol_json.clone(), mol_type.clone(), phase, token).await;
+    while result.transient && retries < TRANSIENT_MAX_RETRIES {
+        tokio::time::sleep(std::time::Duration::from_millis(50 << retries)).await;
+        retries += 1;
+        result =
+            inject_molecule(client, endpoint, mol_json.clone(), mol_type.clone(), phase, token).await;
+    }
+    result.retries = retries;
+    result.latency_ms = start.elapsed().as_millis() as u64;
+    result
+}
+
 async fn inject_molecule(
     client: &reqwest::Client,
     endpoint: &str,
@@ -188,6 +235,8 @@ async fn inject_molecule(
                 .pointer("/data/ProposeMolecule/token")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let transient = body.pointer("/errors/0/extensions/code").and_then(|v| v.as_str())
+                == Some(TRANSIENT_CODE);
 
             ExecResult {
                 mol_type,
@@ -199,6 +248,8 @@ async fn inject_molecule(
                 latency_ms,
                 dag_index: 0,
                 token,
+                transient,
+                retries: 0,
             }
         }
         Err(e) => ExecResult {
@@ -220,6 +271,8 @@ async fn inject_molecule(
             latency_ms,
             dag_index: 0,
             token: None,
+            transient: false,
+            retries: 0,
         },
     }
 }
@@ -351,7 +404,7 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
             let ep = select_endpoint(&endpoints, &args.strategy, idx);
             let token = identity_tokens.get(identity_idx).map(|s| s.as_str());
             let mut result =
-                inject_molecule(&client, ep, mol_json, mol_type.clone(), phase, token).await;
+                inject_with_retry(&client, ep, mol_json, mol_type.clone(), phase, token).await;
 
             if result.validator_status == "accepted" {
                 dag_accepted += 1;
@@ -495,7 +548,7 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
                     async move {
                         let mut out = Vec::with_capacity(specs.len());
                         for spec in specs {
-                            let result = inject_molecule(
+                            let result = inject_with_retry(
                                 &client,
                                 &spec.endpoint,
                                 spec.mol_json,
@@ -595,6 +648,10 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
                 stats.count, stats.accepted, stats.rejected, stats.errors
             );
             stats.print_latency_line();
+            println!(
+                "   Transient retries: {}  failures: {}",
+                stats.transient_retries, stats.transient_failures
+            );
             println!("   Throughput: {:.1} mol/s", stats.throughput());
             println!();
         }
@@ -751,6 +808,8 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
                 "rejected": stats.rejected,
                 "errors": stats.errors,
                 "total_ms": stats.total_ms,
+                "transient_retries": stats.transient_retries,
+                "transient_failures": stats.transient_failures,
                 "throughput": stats.throughput(),
                 "latency": {
                     "min": stats.min(),
@@ -823,4 +882,104 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
     // system fontconfig (it broke Linux installs + CI).
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One-request-per-connection HTTP/1.1 responder: answers each request with
+    /// the next body of `bodies` (the last one repeats) and counts requests.
+    async fn serve(bodies: Vec<&'static str>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // Read the head, then Content-Length bytes of body.
+                let body_start = loop {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    assert!(n > 0, "client closed before sending a request");
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break p + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..body_start]).to_ascii_lowercase();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map(|v| v.trim().parse().unwrap())
+                    .unwrap_or(0);
+                while buf.len() < body_start + len {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    assert!(n > 0, "client closed mid-body");
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let i = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = bodies[i.min(bodies.len() - 1)];
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+                sock.shutdown().await.ok();
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    const TRANSIENT: &str = r#"{"data":null,"errors":[{"message":"transient validation fault","extensions":{"code":"VALIDATOR_TRANSIENT"}}]}"#;
+    const ACCEPTED: &str = r#"{"data":{"ProposeMolecule":{"status":"accepted","molecularHash":"h","reason":null,"token":null,"payload":null}}}"#;
+    const REJECTED: &str = r#"{"data":{"ProposeMolecule":{"status":"rejected","molecularHash":"h","reason":"Wallet not found","token":null,"payload":null}}}"#;
+
+    async fn propose(endpoint: &str) -> ExecResult {
+        // A timeout so a broken server fails the test instead of hanging it; no proxy, so an
+        // HTTP_PROXY in the developer's environment cannot capture 127.0.0.1.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .unwrap();
+        inject_with_retry(&client, endpoint, serde_json::json!({}), "value-transfer".into(), 2, None).await
+    }
+
+    #[tokio::test]
+    async fn transient_answers_are_resent_until_accepted() {
+        let (endpoint, hits) = serve(vec![TRANSIENT, TRANSIENT, ACCEPTED]).await;
+        let r = propose(&endpoint).await;
+        assert_eq!(r.validator_status, "accepted");
+        assert_eq!(r.retries, 2);
+        assert!(!r.transient);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+        // Backoff 50 + 100 ms is part of the reported latency.
+        assert!(r.latency_ms >= 150, "latency {} ms excludes the backoff", r.latency_ms);
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_three_and_the_fault_is_reported() {
+        let (endpoint, hits) = serve(vec![TRANSIENT]).await;
+        let r = propose(&endpoint).await;
+        assert_eq!(r.retries, TRANSIENT_MAX_RETRIES);
+        assert!(r.transient, "a fault still transient after the retries must be reported as such");
+        assert_eq!(r.validator_status, "error");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let mut stats = Stats::new();
+        stats.record(&r);
+        assert_eq!((stats.transient_retries, stats.transient_failures, stats.errors), (3, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_rejection_is_not_resent() {
+        let (endpoint, hits) = serve(vec![REJECTED, ACCEPTED]).await;
+        let r = propose(&endpoint).await;
+        assert_eq!(r.validator_status, "rejected");
+        assert_eq!(r.retries, 0);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }

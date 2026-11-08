@@ -916,6 +916,10 @@ enum BenchCommands {
         /// OTS version the plan's wallets sign with (1 = 16 chains, 2 = 64 chains)
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
         ots_version: u8,
+
+        /// Plan molecule createdAt: 'wall' (signing-time clock) or 'step:<ms>' (plan-start + ms × sequence)
+        #[arg(long, default_value = "wall", value_parser = bench::generate::parse_created_at)]
+        created_at: bench::generate::CreatedAt,
     },
 
     /// Generate a benchmark plan file
@@ -955,6 +959,10 @@ enum BenchCommands {
         /// OTS version the plan's wallets sign with (1 = 16 chains, 2 = 64 chains)
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
         ots_version: u8,
+
+        /// Plan molecule createdAt: 'wall' (signing-time clock) or 'step:<ms>' (plan-start + ms × sequence)
+        #[arg(long, default_value = "wall", value_parser = bench::generate::parse_created_at)]
+        created_at: bench::generate::CreatedAt,
     },
 
     /// Execute an existing benchmark plan
@@ -1537,6 +1545,7 @@ async fn main() -> Result<()> {
                 cell_slug,
                 keep,
                 ots_version,
+                created_at,
             } => {
                 let gen_args = bench::generate::GenerateArgs {
                     identities,
@@ -1548,6 +1557,7 @@ async fn main() -> Result<()> {
                     token_amount,
                     output: String::new(), // filled by run()
                     ots_version: if ots_version == 2 { knishio_client::OtsVersion::V2 } else { knishio_client::OtsVersion::V1 },
+                    created_at,
                 };
                 let host_eff = if local { None } else { host.as_deref() };
                 let cell_admin = psql::PsqlTransport::resolve(&cfg, host_eff, local)
@@ -1577,6 +1587,7 @@ async fn main() -> Result<()> {
                 token_amount,
                 output: output_path,
                 ots_version,
+                created_at,
             } => {
                 let gen_args = bench::generate::GenerateArgs {
                     identities,
@@ -1588,6 +1599,7 @@ async fn main() -> Result<()> {
                     token_amount,
                     output: output_path,
                     ots_version: if ots_version == 2 { knishio_client::OtsVersion::V2 } else { knishio_client::OtsVersion::V1 },
+                    created_at,
                 };
                 bench::generate(gen_args)?;
                 output::success("Plan generation complete");

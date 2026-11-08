@@ -11,6 +11,23 @@
   molecule's ContinuID I-atom, so each signed molecule is about 520 base64
   characters larger. PERF-2 results from a validator kit built with this CLI
   are a new baseline, not comparable with runs that used CLI 0.2.8 or earlier.
+- **`bench execute` resends molecules the validator answers with
+  `VALIDATOR_TRANSIENT`**: up to 3 resends, backoff 50/100/200 ms. A molecule
+  never accepted leaves the identity's next molecule signing from a position
+  the ledger never recorded, so the rest of that chain is rejected "Wallet not
+  found". The resends recover brief faults only: a fault that outlasts the
+  backoff (a 5 s statement timeout repeating, for example) is still reported
+  as a transient failure and its chain still breaks. When the validator could
+  not undo its pre-insert, a resend is answered as a rejection and counted as
+  one. Each phase reports `Transient retries: N  failures: M`, and
+  the `bench-report-<unix>.json` phases carry `transient_retries` and `transient_failures`.
+  A molecule's latency now includes its resends and backoff.
+- **`bench generate` / `bench run --created-at wall|step:<ms>`** (default
+  `wall`, unchanged; `<ms>` at most 86400000). `step:<ms>` stamps molecule *i* of the plan and all its
+  atoms with base + *i*·ms: `step:1` gives every molecule a distinct createdAt
+  whatever the signing speed, `step:0` gives every molecule the same one. A
+  client that signs faster than one molecule per millisecond sends equal
+  createdAt values; this option reproduces either case on purpose.
 
 ## 0.2.8
 

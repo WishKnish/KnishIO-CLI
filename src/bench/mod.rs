@@ -120,6 +120,7 @@ pub async fn run(
         token_amount: gen_args.token_amount,
         output: plan_path.clone(),
         ots_version: gen_args.ots_version,
+        created_at: gen_args.created_at,
     };
     generate::generate(gen)?;
 

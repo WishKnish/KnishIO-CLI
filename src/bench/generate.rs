@@ -29,6 +29,69 @@ pub struct GenerateArgs {
     pub output: String,
     /// OTS version every plan wallet signs with (`--ots-version`, default 1).
     pub ots_version: OtsVersion,
+    /// How plan molecules get their `createdAt` (`--created-at`, default wall).
+    pub created_at: CreatedAt,
+}
+
+/// `createdAt` source for plan molecules.
+///
+/// `Wall`: the SDK's signing-time clock (milliseconds). A fast signer gives consecutive
+/// molecules the same millisecond. `Step(n)`: plan start + `n` ms × the molecule's sequence
+/// number in the plan, applied to the molecule and every atom before signing; `Step(0)` gives
+/// every molecule the same timestamp, `Step(1)` gives strictly increasing ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreatedAt {
+    Wall,
+    Step(u64),
+}
+
+impl std::fmt::Display for CreatedAt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CreatedAt::Wall => write!(f, "wall"),
+            CreatedAt::Step(n) => write!(f, "step:{n}"),
+        }
+    }
+}
+
+/// clap value parser for `--created-at`.
+pub fn parse_created_at(s: &str) -> std::result::Result<CreatedAt, String> {
+    const ERR: &str = "--created-at must be 'wall' or 'step:<ms>' with <ms> at most 86400000";
+    // One day per molecule keeps base + ms × sequence far inside i64 for any plan size.
+    const MAX_STEP_MS: u64 = 86_400_000;
+    if s == "wall" {
+        return Ok(CreatedAt::Wall);
+    }
+    match s.strip_prefix("step:").map(str::parse::<u64>) {
+        Some(Ok(n)) if n <= MAX_STEP_MS => Ok(CreatedAt::Step(n)),
+        _ => Err(ERR.to_string()),
+    }
+}
+
+/// Hands out each plan molecule's `createdAt` under `--created-at step:<n>`.
+struct Stamp {
+    base_ms: i64,
+    mode: CreatedAt,
+    seq: std::cell::Cell<u64>,
+}
+
+impl Stamp {
+    fn new(mode: CreatedAt) -> Self {
+        let base_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        Self { base_ms, mode, seq: std::cell::Cell::new(0) }
+    }
+
+    /// `None` under `Wall` (keep the SDK's clock); otherwise the next timestamp.
+    fn next(&self) -> Option<String> {
+        match self.mode {
+            CreatedAt::Wall => None,
+            CreatedAt::Step(n) => {
+                let seq = self.seq.get();
+                self.seq.set(seq + 1);
+                Some((self.base_ms + (n * seq) as i64).to_string())
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -221,8 +284,8 @@ fn insert_mol(
 // ═══════════════════════════════════════════════════════════════
 
 /// Create an auth molecule (U+I). Auto-adds I-atom.
-fn make_auth(secret: &str, bundle: &str, ots: OtsVersion) -> Result<Molecule> {
-    super::molecules::make_auth(secret, bundle, FIXTURE_CELL_SLUG, ots)
+fn make_auth(secret: &str, bundle: &str, ots: OtsVersion, created_at: Option<String>) -> Result<Molecule> {
+    super::molecules::make_auth(secret, bundle, FIXTURE_CELL_SLUG, ots, created_at)
 }
 
 /// Create a meta molecule (M+I). Auto-adds I-atom.
@@ -239,6 +302,7 @@ fn make_meta(
     meta_type: &str,
     run_id: u64,
     ots: OtsVersion,
+    created_at: Option<String>,
 ) -> Result<Molecule> {
     let type_seq = meta_idx / BENCH_META_TYPES.len();
     let id_slot = type_seq % META_IDS_PER_TYPE;
@@ -257,6 +321,7 @@ fn make_meta(
             MetaItem::new("metaType", meta_type),
         ],
         ots,
+        created_at,
     )
 }
 
@@ -271,6 +336,7 @@ fn make_meta(
 /// (USER remainder) to `mint_position`, the first transfer signs from
 /// `mint_position` (where the balance lives) and matches the pointer. The C-atom
 /// itself signs from `source_position` (the pre-create ContinuID pointer).
+#[allow(clippy::too_many_arguments)]
 fn make_token_create(
     secret: &str,
     bundle: &str,
@@ -279,6 +345,7 @@ fn make_token_create(
     token_slug: &str,
     amount: f64,
     ots: OtsVersion,
+    created_at: Option<String>,
 ) -> Result<Molecule> {
     let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(source_position), None, None, ots)
         .context("Failed to create token-create wallet")?;
@@ -319,6 +386,7 @@ fn make_token_create(
     mol.add_continuid_atom()
         .context("Failed to add ContinuID atom to token-create")?;
 
+    super::molecules::apply_created_at(&mut mol, created_at);
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign token-create molecule")?;
 
@@ -326,6 +394,7 @@ fn make_token_create(
 }
 
 /// Create a token-request molecule (T + manual I).
+#[allow(clippy::too_many_arguments)]
 fn make_token_request(
     secret: &str,
     bundle: &str,
@@ -334,6 +403,7 @@ fn make_token_request(
     amount: f64,
     identity_idx: usize,
     ots: OtsVersion,
+    created_at: Option<String>,
 ) -> Result<Molecule> {
     let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(position), None, None, ots)
         .context("Failed to create token-request wallet")?;
@@ -365,6 +435,7 @@ fn make_token_request(
     mol.add_continuid_atom()
         .context("Failed to add ContinuID atom to token-request")?;
 
+    super::molecules::apply_created_at(&mut mol, created_at);
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign token-request molecule")?;
 
@@ -392,6 +463,7 @@ fn make_value_transfer(
     source_balance: f64,
     transfer_idx: usize,
     ots: OtsVersion,
+    created_at: Option<String>,
 ) -> Result<Molecule> {
     let mut source_wallet = Wallet::create_with_ots_version(Some(secret), None, token_slug, Some(position), None, None, ots)
         .context("Failed to create value-transfer source wallet")?;
@@ -438,6 +510,7 @@ fn make_value_transfer(
     mol.add_continuid_atom()
         .context("Failed to add ContinuID atom to value-transfer")?;
 
+    super::molecules::apply_created_at(&mut mol, created_at);
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign value-transfer molecule")?;
 
@@ -455,6 +528,7 @@ fn make_rule(
     rule_target: &str,
     run_id: u64,
     ots: OtsVersion,
+    created_at: Option<String>,
 ) -> Result<Molecule> {
     let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(position), None, None, ots)
         .context("Failed to create rule wallet")?;
@@ -482,6 +556,7 @@ fn make_rule(
         None,
     )
     .context("Failed to init rule")?;
+    super::molecules::apply_created_at(&mut mol, created_at);
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign rule molecule")?;
 
@@ -489,6 +564,7 @@ fn make_rule(
 }
 
 /// Create a burn molecule (V+V + manual I).
+#[allow(clippy::too_many_arguments)]
 fn make_burn(
     secret: &str,
     bundle: &str,
@@ -497,6 +573,7 @@ fn make_burn(
     amount: f64,
     source_balance: f64,
     ots: OtsVersion,
+    created_at: Option<String>,
 ) -> Result<Molecule> {
     let mut source_wallet =
         Wallet::create_with_ots_version(Some(secret), None, token_slug, Some(position), None, None, ots)
@@ -519,6 +596,7 @@ fn make_burn(
     mol.add_continuid_atom()
         .context("Failed to add ContinuID atom to burn")?;
 
+    super::molecules::apply_created_at(&mut mol, created_at);
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign burn molecule")?;
 
@@ -635,6 +713,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
         ("generated_at", run_id.to_string()),
         ("generator_version", "1.0.0".to_string()),
         ("cell_slug", FIXTURE_CELL_SLUG.to_string()),
+        ("created_at", args.created_at.to_string()),
     ];
     for (k, v) in &config_pairs {
         conn.execute(
@@ -658,6 +737,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
     let mut phase_timings: HashMap<&str, (usize, f64)> = HashMap::new();
     let mut type_timings: HashMap<String, (usize, f64)> = HashMap::new();
     let mut global_order: usize = 0;
+    let stamp = Stamp::new(args.created_at);
 
     // Collect all bundles for value-transfer recipients
     let mut bundles: Vec<String> = Vec::with_capacity(args.identities);
@@ -689,7 +769,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
 
         // ── Phase 0: Auth ──
         let phase_start = Instant::now();
-        let auth_mol = make_auth(&secret, bundle, args.ots_version)?;
+        let auth_mol = make_auth(&secret, bundle, args.ots_version, stamp.next())?;
         let mut next_pos = advance_chain(&auth_mol)?;
         let (hash, payload) = mol_to_payload(&auth_mol)?;
         insert_mol(&conn, k, 0, chain_order, global_order, "auth", &hash, &payload)?;
@@ -724,6 +804,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                 &token_slug,
                 args.token_amount,
                 args.ots_version,
+                stamp.next(),
             )?;
             next_pos = mint_position; // ContinuID pointer now == the funded token wallet
             let (hash, payload) = mol_to_payload(&tc_mol)?;
@@ -765,6 +846,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                     args.token_amount,
                     k,
                     args.ots_version,
+                    stamp.next(),
                 )?;
                 next_pos = advance_chain(&tr_mol)?;
                 let (hash, payload) = mol_to_payload(&tr_mol)?;
@@ -827,7 +909,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             if run_meta && i < meta_count {
                 let start = Instant::now();
                 let meta_type = BENCH_META_TYPES[(meta_idx + k) % BENCH_META_TYPES.len()];
-                let mol = make_meta(&secret, bundle, &next_pos, k, meta_idx, meta_type, run_id, args.ots_version)?;
+                let mol = make_meta(&secret, bundle, &next_pos, k, meta_idx, meta_type, run_id, args.ots_version, stamp.next())?;
                 next_pos = advance_chain(&mol)?;
                 let (hash, payload) = mol_to_payload(&mol)?;
                 insert_mol(&conn, k, 2, chain_order, global_order, "meta", &hash, &payload)?;
@@ -867,6 +949,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                     token_balance,
                     vt_idx,
                     args.ots_version,
+                    stamp.next(),
                 )?;
                 next_pos = next;
                 token_balance -= amount_per_transfer;
@@ -903,7 +986,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
             for r in 0..args.rules_per_identity {
                 let start = Instant::now();
                 let rule_target = BENCH_RULE_TARGETS[r % BENCH_RULE_TARGETS.len()];
-                let mol = make_rule(&secret, bundle, &next_pos, k, r, rule_target, run_id, args.ots_version)?;
+                let mol = make_rule(&secret, bundle, &next_pos, k, r, rule_target, run_id, args.ots_version, stamp.next())?;
                 next_pos = advance_chain(&mol)?;
                 let (hash, payload) = mol_to_payload(&mol)?;
                 insert_mol(
@@ -943,6 +1026,7 @@ pub fn generate(args: GenerateArgs) -> Result<()> {
                     burn_amount,
                     token_balance,
                     args.ots_version,
+                    stamp.next(),
                 )?;
                 next_pos = advance_chain(&mol)?;
                 token_balance -= burn_amount;
@@ -1080,6 +1164,7 @@ mod tests {
             token_amount: 1000.0,
             output: plan.to_string_lossy().into_owned(),
             ots_version: OtsVersion::V1,
+            created_at: CreatedAt::Wall,
         })
         .unwrap();
 
@@ -1151,6 +1236,7 @@ mod tests {
             token_amount: 1000.0,
             output: plan.to_string_lossy().into_owned(),
             ots_version: OtsVersion::V2,
+            created_at: CreatedAt::Wall,
         })
         .unwrap();
 
@@ -1185,6 +1271,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Generate a 2-identity plan of `types` under `mode` and return every molecule's
+    /// `(mol_type, payload)` in plan order.
+    fn stamped_plan(mode: CreatedAt, types: &[&str], tag: &str) -> Vec<(String, serde_json::Value)> {
+        let dir = std::env::temp_dir().join(format!("knishio-gen-createdat-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("plan.db");
+        generate(GenerateArgs {
+            identities: 2,
+            types: types.iter().map(|t| t.to_string()).collect(),
+            metas_per_identity: 1,
+            transfers_per_identity: 2,
+            rules_per_identity: 1,
+            burns_per_identity: 1,
+            token_amount: 1000.0,
+            output: plan.to_string_lossy().into_owned(),
+            ots_version: OtsVersion::V1,
+            created_at: mode,
+        })
+        .unwrap();
+        let conn = Connection::open(&plan).unwrap();
+        let recorded: String = conn
+            .query_row("SELECT value FROM config WHERE key = 'created_at'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, mode.to_string(), "plan config records the createdAt mode");
+        let mut stmt = conn.prepare("SELECT mol_type, payload_json FROM molecules ORDER BY global_order").unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .map(|r| {
+                let (t, p) = r.unwrap();
+                (t, serde_json::from_str(&p).unwrap())
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        rows
+    }
+
+    /// Every molecule's createdAt, after checking that each atom carries the molecule's value
+    /// and that the stamped molecule still verifies: the molecular hash recomputes from the
+    /// stamped atoms and the OTS signature checks against it. (`verify` would also demand a
+    /// funded sender wallet, which a plan file does not carry.) A burn sends value to the
+    /// null wallet, an atom with an empty position, which `Molecule::fromJSON` refuses (its
+    /// atom validation is not optional); its atoms are rebuilt one by one without that
+    /// check, so its hash is still recomputed, but its OTS signature is not checked here.
+    fn created_ats(rows: &[(String, serde_json::Value)]) -> Vec<i64> {
+        rows.iter()
+            .map(|(mol_type, m)| {
+                let ts = m["createdAt"].as_str().unwrap().to_string();
+                for atom in m["atoms"].as_array().unwrap() {
+                    assert_eq!(atom["createdAt"].as_str(), Some(ts.as_str()), "{mol_type}: atom createdAt follows the molecule");
+                }
+                let declared = m["molecularHash"].as_str().unwrap();
+                if mol_type == "burn" {
+                    let atoms: Vec<knishio_client::Atom> = m["atoms"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| {
+                            let lax = knishio_client::types::AtomFromJsonOptions { validate_structure: false, strict_mode: false };
+                            knishio_client::Atom::from_json(a, lax).unwrap()
+                        })
+                        .collect();
+                    let recomputed = knishio_client::Atom::hash_atoms(&atoms, "base17").unwrap();
+                    assert_eq!(recomputed, declared, "burn: hash covers the stamped atoms");
+                } else {
+                    let mol = Molecule::fromJSON(&m.to_string()).unwrap();
+                    let recomputed = knishio_client::Atom::hash_atoms(&mol.atoms, "base17").unwrap();
+                    assert_eq!(recomputed, declared, "{mol_type}: hash covers the stamped atoms");
+                    knishio_client::CheckMolecule::new(&mol)
+                        .unwrap()
+                        .ots()
+                        .unwrap_or_else(|e| panic!("stamped {mol_type} {declared} fails ots(): {e:?}"));
+                }
+                ts.parse().unwrap()
+            })
+            .collect()
+    }
+
+    /// Both plans together go through every builder: auth, token-create, meta,
+    /// value-transfer, rule and burn, plus token-request (only made without value transfers).
+    const ALL_TYPES: &[&str] = &["meta", "value-transfer", "rule", "burn"];
+    const BURN_ONLY: &[&str] = &["burn"];
+
+    fn every_builder(rows: &[(String, serde_json::Value)], more: &[(String, serde_json::Value)]) {
+        let seen: std::collections::BTreeSet<&str> =
+            rows.iter().chain(more).map(|(t, _)| t.as_str()).collect();
+        for want in ["auth", "token-create", "token-request", "meta", "value-transfer", "rule", "burn"] {
+            assert!(seen.contains(want), "the plans exercise the {want} builder (saw {seen:?})");
+        }
+    }
+
+    #[test]
+    fn created_at_step_one_is_strictly_increasing() {
+        let all = stamped_plan(CreatedAt::Step(1), ALL_TYPES, "step1");
+        let burn = stamped_plan(CreatedAt::Step(1), BURN_ONLY, "step1b");
+        every_builder(&all, &burn);
+        for rows in [&all, &burn] {
+            let ts = created_ats(rows);
+            assert!(ts.windows(2).all(|w| w[1] == w[0] + 1), "step:1 gives consecutive milliseconds: {ts:?}");
+        }
+    }
+
+    #[test]
+    fn created_at_step_zero_ties_every_molecule() {
+        let all = stamped_plan(CreatedAt::Step(0), ALL_TYPES, "step0");
+        let burn = stamped_plan(CreatedAt::Step(0), BURN_ONLY, "step0b");
+        every_builder(&all, &burn);
+        for rows in [&all, &burn] {
+            let ts = created_ats(rows);
+            assert!(ts.iter().all(|&t| t == ts[0]), "step:0 gives one timestamp: {ts:?}");
+        }
+    }
+
+    #[test]
+    fn created_at_parser_accepts_only_wall_and_step() {
+        assert_eq!(parse_created_at("wall"), Ok(CreatedAt::Wall));
+        assert_eq!(parse_created_at("step:0"), Ok(CreatedAt::Step(0)));
+        assert_eq!(parse_created_at("step:25"), Ok(CreatedAt::Step(25)));
+        assert_eq!(parse_created_at("step:86400000"), Ok(CreatedAt::Step(86_400_000)));
+        for bad in ["", "step:", "step:-1", "step:x", "Wall", "steps:1", "step:86400001", "step:18446744073709551615"] {
+            assert_eq!(
+                parse_created_at(bad),
+                Err("--created-at must be 'wall' or 'step:<ms>' with <ms> at most 86400000".to_string()),
+                "{bad:?}"
+            );
+        }
+    }
+
     /// Identity 0's secret, bundle and first signing position (after its auth
     /// molecule), derived exactly as `generate()` does for a plan's `run_id`.
     fn identity0(run_id: u64) -> (String, String, String) {
@@ -1193,7 +1408,7 @@ mod tests {
             .unwrap()
             .bundle
             .unwrap();
-        let pos = advance_chain(&make_auth(&secret, &bundle, OtsVersion::V1).unwrap()).unwrap();
+        let pos = advance_chain(&make_auth(&secret, &bundle, OtsVersion::V1, None).unwrap()).unwrap();
         (secret, bundle, pos)
     }
 
@@ -1218,7 +1433,7 @@ mod tests {
             .iter()
             .map(|&r| {
                 let (secret, bundle, pos) = identity0(r);
-                signed_id(&make_meta(&secret, &bundle, &pos, 0, 0, BENCH_META_TYPES[0], r, OtsVersion::V1).unwrap())
+                signed_id(&make_meta(&secret, &bundle, &pos, 0, 0, BENCH_META_TYPES[0], r, OtsVersion::V1, None).unwrap())
             })
             .collect();
         assert_ne!(ids[0], ids[1]);
@@ -1233,7 +1448,7 @@ mod tests {
             .iter()
             .map(|&r| {
                 let (secret, bundle, pos) = identity0(r);
-                signed_id(&make_rule(&secret, &bundle, &pos, 0, 0, BENCH_RULE_TARGETS[0], r, OtsVersion::V1).unwrap())
+                signed_id(&make_rule(&secret, &bundle, &pos, 0, 0, BENCH_RULE_TARGETS[0], r, OtsVersion::V1, None).unwrap())
             })
             .collect();
         assert_ne!(ids[0], ids[1]);

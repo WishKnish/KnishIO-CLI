@@ -16,8 +16,25 @@ pub(crate) fn next_position(mol: &Molecule) -> Result<String> {
         .context("Remainder wallet has no position")
 }
 
+/// Under `--created-at step:<n>`, set the molecule's and every atom's `createdAt` before signing:
+/// the validator orders by the molecule value, and the molecular hash covers the atom values.
+pub(crate) fn apply_created_at(mol: &mut Molecule, created_at: Option<String>) {
+    if let Some(ts) = created_at {
+        for atom in &mut mol.atoms {
+            atom.created_at = ts.clone();
+        }
+        mol.created_at = ts;
+    }
+}
+
 /// Create an auth molecule (U+I). Auto-adds I-atom.
-pub(crate) fn make_auth(secret: &str, bundle: &str, cell_slug: &str, ots: OtsVersion) -> Result<Molecule> {
+pub(crate) fn make_auth(
+    secret: &str,
+    bundle: &str,
+    cell_slug: &str,
+    ots: OtsVersion,
+    created_at: Option<String>,
+) -> Result<Molecule> {
     let auth_wallet = Wallet::create_with_ots_version(Some(secret), None, "AUTH", None, None, None, ots)
         .context("Failed to create auth wallet")?;
 
@@ -33,6 +50,7 @@ pub(crate) fn make_auth(secret: &str, bundle: &str, cell_slug: &str, ots: OtsVer
 
     mol.init_authorization(vec![MetaItem::new("pubkey", "bench-pubkey")])
         .context("Failed to init authorization")?;
+    apply_created_at(&mut mol, created_at);
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign auth molecule")?;
 
@@ -49,6 +67,7 @@ pub(crate) fn make_meta_custom(
     meta_id: &str,
     metas: Vec<MetaItem>,
     ots: OtsVersion,
+    created_at: Option<String>,
 ) -> Result<Molecule> {
     let source_wallet = Wallet::create_with_ots_version(Some(secret), None, "USER", Some(position), None, None, ots)
         .context("Failed to create meta wallet")?;
@@ -65,6 +84,7 @@ pub(crate) fn make_meta_custom(
 
     mol.init_meta(metas, meta_type, meta_id, None)
         .context("Failed to init meta")?;
+    apply_created_at(&mut mol, created_at);
     mol.sign(Some(bundle.to_string()), false, false)
         .context("Failed to sign meta molecule")?;
 

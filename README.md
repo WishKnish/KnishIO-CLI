@@ -835,6 +835,7 @@ knishio bench run [OPTIONS]
 | `--rules-per-identity` | int | 5 | Rule molecules per identity |
 | `--burns-per-identity` | int | 5 | Burn molecules per identity |
 | `--token-amount` | float | 1000000.0 | Initial token supply for value transfers |
+| `--created-at` | `wall` \| `step:<ms>` | `wall` | Molecule and atom `createdAt`: wall clock, or base + *i*·ms for the plan's *i*-th molecule (`step:0` gives them all one value) |
 | `--endpoint` | URL | `https://localhost:8080` | Validator GraphQL endpoint |
 | `--concurrency` | int | 5 | Concurrent molecule submissions |
 | `--cell-slug` | string | *(none)* | Target cell slug |
@@ -869,6 +870,7 @@ knishio bench generate [OPTIONS] -o <PATH>
 | `--rules-per-identity` | int | 5 | Rule molecules per identity |
 | `--burns-per-identity` | int | 5 | Burn molecules per identity |
 | `--token-amount` | float | 1000000.0 | Initial token supply |
+| `--created-at` | `wall` \| `step:<ms>` | `wall` | Molecule and atom `createdAt`: wall clock, or base + *i*·ms for the plan's *i*-th molecule (`step:0` gives them all one value) |
 
 ```bash
 knishio bench generate --types meta,value-transfer --identities 100 -o plan.db
@@ -894,6 +896,8 @@ knishio bench execute <PLAN> [OPTIONS]
 # Execute with high concurrency
 knishio bench execute plan.db --concurrency 20 --cell-slug TESTCELL
 ```
+
+A molecule answered `VALIDATOR_TRANSIENT` is sent again up to 3 times (backoff 50, 100, 200 ms). Each phase reports `Transient retries` and `failures` (still transient after the resends), and the `bench-report-<unix>.json` phases carry `transient_retries` and `transient_failures`. A molecule that is never accepted breaks the rest of its identity's chain ("Wallet not found"). When the validator could not undo its pre-insert, the resend is answered "already exists" and counted as a rejection.
 
 ### bench clean
 
