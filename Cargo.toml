@@ -53,7 +53,7 @@ indicatif = "0.17"
 knishio-client = "2.2.0"
 
 # SQLite for benchmark fixture storage
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 # Random number generation (benchmark endpoint selection)
 rand = "0.8"

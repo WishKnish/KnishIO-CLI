@@ -485,8 +485,10 @@ pub async fn execute(args: ExecuteArgs) -> Result<()> {
         .query_row(
             "SELECT COUNT(DISTINCT identity_idx) FROM molecules WHERE phase = 2",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0),
         )
+        .ok()
+        .and_then(|n| usize::try_from(n).ok())
         .unwrap_or(args.concurrency);
     let effective_concurrency = args.concurrency.min(num_identities);
 

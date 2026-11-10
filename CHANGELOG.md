@@ -28,6 +28,12 @@
   whatever the signing speed, `step:0` gives every molecule the same one. A
   client that signs faster than one molecule per millisecond sends equal
   createdAt values; this option reproduces either case on purpose.
+- **Security: rusqlite 0.41** (was 0.31), bundling SQLite 3.54.1 through
+  libsqlite3-sys 0.39.1, for RUSTSEC-2026-0459 (SQLite before 3.54.0 can return
+  uninitialized page-cache memory for a crafted database/WAL pair). Only the
+  bench plan store uses SQLite. rusqlite 0.38 dropped `FromSql` for `usize`, so
+  `bench execute` reads the phase-2 identity count as `i64` and converts it;
+  behaviour is unchanged.
 
 ## 0.2.8
 
