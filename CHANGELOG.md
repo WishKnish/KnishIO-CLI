@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Security: the repository no longer ships `knishio.toml` with
+  `insecure_tls = true`.** Running any command inside a checkout used to turn off
+  TLS certificate checks for every validator URL, including remote ones, without
+  `--insecure`. The file is now untracked, gitignored and excluded from the
+  published crate; `knishio.toml.example` is the template and sets
+  `insecure_tls = false`. Copy it to `knishio.toml` (or run `knishio init`) and
+  set `insecure_tls = true` only for a local stack with a self-signed certificate.
 - **knishio-client 2.2.0** (was 0.9.3). `Wallet::create` takes the ML-KEM
   parameter set; the CLI passes `None` (ML-KEM-1024). Bench and smoke molecules
   stay OTS v1 (standalone wallets).

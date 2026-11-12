@@ -17,8 +17,8 @@
 
 [validator]
 # url = "https://localhost:8080"
-# Accept self-signed TLS certificates (set to true for local dev)
-insecure_tls = true
+# Accept self-signed TLS certificates (set to true only for a local dev stack)
+insecure_tls = false
 
 [docker]
 # Back-compat single-file knob. Ignored when the accel matrix below (which

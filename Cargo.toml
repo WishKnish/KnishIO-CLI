@@ -9,6 +9,7 @@ repository = "https://github.com/WishKnish/KnishIO-CLI"
 keywords = ["knishio", "dlt", "validator", "cli", "docker"]
 categories = ["command-line-utilities"]
 readme = "README.md"
+exclude = ["knishio.toml"]
 
 [[bin]]
 name = "knishio"

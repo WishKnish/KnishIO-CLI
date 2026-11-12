@@ -10,6 +10,9 @@ target/
 .env.local
 .env.*.local
 
+# Runtime CLI config: per-deploy operator state, not source (template: knishio.toml.example)
+knishio.toml
+
 # IDE
 .idea/
 .vscode/
