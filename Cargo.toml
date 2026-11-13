@@ -31,20 +31,20 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Terminal colors
-colored = "2.1"
+colored = "3.1"
 
 # Table formatting
-tabled = "0.16"
+tabled = "0.22"
 
 # TOML config file parsing
-toml = "0.8"
+toml = "1.2"
 
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"
 
 # Progress bars (benchmark)
-indicatif = "0.17"
+indicatif = "0.18"
 
 # KnishIO SDK for molecule signing and wallet operations (benchmark).
 # Always a crates.io version string in shipped builds. Temporarily swap to
@@ -57,7 +57,7 @@ knishio-client = "2.3.0"
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 # Random number generation (benchmark endpoint selection)
-rand = "0.8"
+rand = "0.10"
 
 # Async stream utilities (benchmark concurrent execution)
 futures-util = "0.3"
@@ -66,7 +66,7 @@ futures-util = "0.3"
 # against the validator's /graphql/ws. rustls over native-tls because
 # the validator serves TLS 1.3 + ChaCha20-Poly1305 (rustls server side);
 # macOS SecureTransport via native-tls has known issues with that combo.
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 # ring feature required — rustls 0.23 needs an explicit crypto provider;
 # default features don't always install one. Matches the crypto stack
 # reqwest (also used here) uses internally.
@@ -75,11 +75,11 @@ rustls-pki-types = "1"
 webpki-roots = "1.0.10"
 
 # TLS certificate inspection for `knishio verify` (expiry countdown)
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # SHAKE256 chain-of-custody for `deploy ship` (same construction as the
 # validator's SHAKE256SUMS: sha3::Shake256, 32-byte XOF, hex)
-sha3 = "0.10"
+sha3 = "0.12"
 hex = "0.4"
 
 [profile.release]
