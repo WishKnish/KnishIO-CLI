@@ -1,6 +1,6 @@
 [package]
 name = "knishio-cli"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 description = "KnishIO validator orchestration CLI — Docker control, cell management, benchmarks, and health checks"
 license = "GPL-3.0-or-later"
@@ -51,7 +51,7 @@ indicatif = "0.17"
 # `{ path = "../../sdks/KnishIO-Client-Rust" }` ONLY while testing an
 # unpublished SDK change, then revert before shipping. Guard lives in
 # servers/knishio-validator-rust/Makefile → `check-no-path-dep`.
-knishio-client = "2.2.0"
+knishio-client = "2.3.0"
 
 # SQLite for benchmark fixture storage
 rusqlite = { version = "0.41", features = ["bundled"] }

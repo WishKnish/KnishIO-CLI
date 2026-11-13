@@ -1356,6 +1356,19 @@ type Mutation {
 	Matches SDK MutationLinkIdentifier
 	"""
 	LinkIdentifier(bundle: String!, type: String!, content: String!): LinkIdentifierResponse!
+	"""
+	Validator peer authentication, step 1: request a challenge sealed to the caller's
+	ML-KEM-1024 key. Succeeds only for an operator-pinned, active peer (`host` as pinned
+	in `P2P_BOOTSTRAP_PEERS`) whose pinned fingerprint matches `kemPubkey`. Every
+	refusal returns the same error.
+	"""
+	PeerChallenge(host: String!, kemPubkey: String!): PeerAuthEnvelope!
+	"""
+	Validator peer authentication, step 2: exchange the opened challenge for a `peer`
+	token (federation operations only), returned sealed to the pinned key as
+	`{token, expiresAt}`. Every refusal returns the same error.
+	"""
+	PeerToken(host: String!, response: String!): PeerAuthEnvelope!
 }
 
 """
@@ -1364,6 +1377,15 @@ Paginator info (SDK compatibility)
 type PaginatorInfo {
 	currentPage: Int!
 	total: Int!
+}
+
+"""
+Sealed result of `PeerChallenge` / `PeerToken`: a stringified CipherHash map
+(`{ "<hashShare(kemPubkey)>": {cipherText, encryptedMessage} }`) that only the holder of
+the pinned ML-KEM-1024 key can open.
+"""
+type PeerAuthEnvelope {
+	hash: String!
 }
 
 """
@@ -1755,6 +1777,34 @@ type QueryRoot {
 	Capped at 100 molecules per request.
 	"""
 	syncMolecules(molecularHashes: [String!]!): [SyncMolecule!]!
+	"""
+	Peer-only (Tier 3b anti-entropy): a SHAKE256 digest per molecular-hash prefix of a
+	cell's accepted molecules, so a peer can tell which prefixes it is missing.
+	"""
+	syncDigest(		cellSlug: String!,
+		"""
+		Prefix length, 1 to 4 characters
+		"""
+		prefixLength: Int!
+	): SyncDigestResult!
+	"""
+	Peer-only (Tier 3b anti-entropy): a cell's accepted molecular hashes starting with
+	`prefix`, in byte order, one page at a time.
+	"""
+	syncHashes(		cellSlug: String!,
+		"""
+		Hash prefix, 1 to 4 characters
+		"""
+		prefix: String!,
+		"""
+		Return hashes after this one (exclusive)
+		"""
+		after: String,
+		"""
+		Page size, 1 to 10000
+		"""
+		limit: Int!
+	): [String!]!
 }
 
 type SubscriptionRoot {
@@ -1907,6 +1957,35 @@ type SyncAtom {
 	unversioned atoms and for atoms stored before 0.8.5
 	"""
 	version: String
+}
+
+"""
+One molecular-hash prefix group of a cell (Tier 3b anti-entropy).
+"""
+type SyncDigestBucket {
+	"""
+	The first `prefixLength` characters shared by the group's hashes
+	"""
+	prefix: String!
+	"""
+	Accepted molecules in the group
+	"""
+	count: Int!
+	"""
+	SHAKE256 (256-bit, lowercase hex) over the group's hashes in byte order, each followed by a newline
+	"""
+	digest: String!
+}
+
+"""
+Response for syncDigest query
+"""
+type SyncDigestResult {
+	prefixLength: Int!
+	"""
+	Non-empty groups, in byte order of their prefixes
+	"""
+	buckets: [SyncDigestBucket!]!
 }
 
 """

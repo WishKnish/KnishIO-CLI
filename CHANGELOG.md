@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.9
+
 - **Security: the repository no longer ships `knishio.toml` with
   `insecure_tls = true`.** Running any command inside a checkout used to turn off
   TLS certificate checks for every validator URL, including remote ones, without
@@ -9,7 +11,7 @@
   published crate; `knishio.toml.example` is the template and sets
   `insecure_tls = false`. Copy it to `knishio.toml` (or run `knishio init`) and
   set `insecure_tls = true` only for a local stack with a self-signed certificate.
-- **knishio-client 2.2.0** (was 0.9.3). `Wallet::create` takes the ML-KEM
+- **knishio-client 2.3.0** (was 0.9.3). `Wallet::create` takes the ML-KEM
   parameter set; the CLI passes `None` (ML-KEM-1024). Bench and smoke molecules
   stay OTS v1 (standalone wallets).
 - **Bench workload change: wallet keys are now ML-KEM-1024.** 0.9.3 always
@@ -41,6 +43,19 @@
   bench plan store uses SQLite. rusqlite 0.38 dropped `FromSql` for `usize`, so
   `bench execute` reads the phase-2 identity count as `i64` and converts it;
   behaviour is unchanged.
+
+- Dependency updates within the existing version requirements: clap 4.6.7,
+  clap_complete 4.6.11, tokio 1.54.1, serde 1.0.229, serde_json 1.0.154,
+  anyhow 1.0.104, thiserror 2.0.21, futures-util 0.3.34, rustls-pki-types
+  1.15.1, webpki-roots 1.0.11. The updates that need new major or minor
+  versions (colored, tabled, toml, indicatif, rand, tokio-tungstenite,
+  x509-parser, sha3) are not taken.
+- **Security: quinn-udp 0.5.16** (was 0.5.14) for RUSTSEC-2026-0538 (the receive
+  loop can spin after a truncated datagram); lock-only, within the existing
+  requirement.
+- `tests/validator-schema.graphql` is the validator's current SDL again (it
+  adds the peer-authentication and anti-entropy operations), so the
+  `vendored_sdl_matches_validator_repo` test passes.
 
 ## 0.2.8
 
