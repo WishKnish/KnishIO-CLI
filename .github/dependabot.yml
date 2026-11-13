@@ -1,0 +1,51 @@
+# Dependabot — keeps GitHub Actions current, keeps the SHA pins updatable, and watches the
+# crate graph.
+#
+# This repo had NO dependabot.yml at all until 2026-08, while the eight SDK repos have had one
+# since 2026-08-05. That gap is exactly how the fleet previously accumulated a node16 action
+# nobody noticed: drift is invisible until something force-retires and breaks on someone
+# else's schedule rather than ours.
+#
+# Every `uses:` in .github/workflows is pinned to a 40-character commit SHA rather than a
+# mutable tag. A SHA pin with no updater is a pin that FREEZES — it trades a mutable-ref risk
+# for an unpatched-dependency risk. Dependabot understands SHA pins, bumps them, and rewrites
+# the trailing version comment. The pinning and this file are only correct together.
+#
+# Grouped so this repo produces two PRs a week at most, not a wall of one-line PRs.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+
+  # The LIBRARY ecosystem, separate from github-actions above so the two arrive as two
+  # distinguishable PRs a week rather than one mixed pile ("ci" vs "build" prefixes).
+  #
+  # cooldown: a release younger than 7 days is not proposed AT ALL. The ChainDrop class of
+  # attack is a malicious version that is live for hours before anyone notices it, so the
+  # defence is refusing to be the first consumer of anything. It delays legitimate fixes by
+  # the same week — that is the trade, made knowingly.
+  #
+  # Cargo.lock IS committed here (unlike the Rust SDK, which gitignores it), so these bumps
+  # move the lock the test job builds --locked against. Read the diff, do not rubber-stamp.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "build"
