@@ -281,8 +281,7 @@ fn select_endpoint<'a>(endpoints: &'a [String], strategy: &Strategy, idx: usize)
     match strategy {
         Strategy::RoundRobin => &endpoints[idx % endpoints.len()],
         Strategy::Random => {
-            use rand::Rng;
-            let i = rand::thread_rng().gen_range(0..endpoints.len());
+            let i = rand::random_range(0..endpoints.len());
             &endpoints[i]
         }
     }

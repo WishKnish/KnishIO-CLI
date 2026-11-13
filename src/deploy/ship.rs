@@ -12,14 +12,20 @@ use crate::output;
 /// (local sha of the tarball vs remote sha), and the bootstrap re-verifies
 /// the inner binary against SHAKE256SUMS at install time.
 fn local_shake256(path: &Path) -> Result<String> {
-    use sha3::digest::{ExtendableOutput, Update, XofReader};
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let mut hasher = sha3::Shake256::default();
-    hasher.update(&bytes);
+    Ok(shake256_hex(&bytes))
+}
+
+/// SHAKE256 with a 32-byte output, hex-encoded: the same construction as the
+/// remote side's `hashlib.shake_256(...).hexdigest(32)`.
+fn shake256_hex(bytes: &[u8]) -> String {
+    use shake::{ExtendableOutput, Update, XofReader};
+    let mut hasher = shake::Shake256::default();
+    hasher.update(bytes);
     let mut out = [0u8; 32];
     hasher.finalize_xof().read(&mut out);
-    Ok(hex::encode(out))
+    hex::encode(out)
 }
 
 /// The remote SHAKE256 command, used by BOTH artifact mode (printed) and
@@ -141,5 +147,20 @@ mod tests {
         assert!(cmd.contains("hexdigest(32)"), "SHAKE256 32-byte XOF: {cmd}");
         // The path must not be passed bare to open() — that's the bug.
         assert!(!cmd.contains("open(\"~"), "tilde passed bare to open(): {cmd}");
+    }
+
+    /// The local hash must equal the remote side's
+    /// `hashlib.shake_256(...).hexdigest(32)`, or every `deploy ship` fails its
+    /// custody check. Vectors from Python's hashlib.
+    #[test]
+    fn shake256_hex_matches_hashlib() {
+        assert_eq!(
+            shake256_hex(b""),
+            "46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f"
+        );
+        assert_eq!(
+            shake256_hex(b"abc"),
+            "483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739"
+        );
     }
 }

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.2.10
+
+- **Dependency updates (the eight held back from 0.2.9):** colored 3.1
+  (was 2.1), toml 1.2 (was 0.8), indicatif 0.18 (was 0.17), rand 0.10 (was
+  0.8), tokio-tungstenite 0.30 (was 0.24), x509-parser 0.18 (was 0.16).
+- **`deploy ship` takes SHAKE256 from the `shake` crate** (sha3 0.12 moved
+  `Shake256` there); the digest is unchanged, and a unit test pins it to
+  Python's `hashlib.shake_256(...).hexdigest(32)` on two inputs.
+- **`tabled` removed:** nothing used it.
+- rand 0.10 removed `thread_rng`; `knishio init` secrets and the bench's
+  random endpoint choice use `rand::random` / `rand::random_range`, which
+  draw from the same thread-local generator.
+
 ## 0.2.9
 
 - **Security: the repository no longer ships `knishio.toml` with

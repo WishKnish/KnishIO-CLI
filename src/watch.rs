@@ -282,7 +282,7 @@ async fn run_subscription(
         },
     });
     ws.send(Message::Text(
-        serde_json::to_string(&sub_msg).expect("static json"),
+        serde_json::to_string(&sub_msg).expect("static json").into(),
     ))
     .await
     .context("failed to send subscribe")?;
@@ -308,7 +308,8 @@ async fn run_subscription(
                 let _ = ws
                     .send(Message::Text(
                         serde_json::to_string(&json!({"id": sub_id, "type": "complete"}))
-                            .expect("static json"),
+                            .expect("static json")
+                            .into(),
                     ))
                     .await;
                 let _ = ws.close(None).await;
@@ -409,7 +410,7 @@ mod tests {
     use super::*;
 
     fn text(json: &str) -> Message {
-        Message::Text(json.to_string())
+        Message::Text(json.to_string().into())
     }
 
     /// Guards CLI-5 half 1: the DAG subscription must select the field name the

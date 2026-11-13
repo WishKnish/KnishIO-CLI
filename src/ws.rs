@@ -126,7 +126,8 @@ pub async fn connect_and_ack(ws_url: &str, insecure_tls: bool) -> Result<WsStrea
 
     ws.send(Message::Text(
         serde_json::to_string(&json!({"type": "connection_init", "payload": {}}))
-            .expect("static json"),
+            .expect("static json")
+            .into(),
     ))
     .await
     .context("failed to send connection_init")?;
@@ -236,7 +237,8 @@ pub async fn subscribe_and_probe(
             "type": "subscribe",
             "payload": { "query": query, "variables": variables },
         }))
-        .expect("static json"),
+        .expect("static json")
+        .into(),
     ))
     .await
     .context("failed to send subscribe")?;

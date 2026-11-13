@@ -7,7 +7,6 @@
 //! - Self-signed TLS certificates (optional)
 
 use anyhow::{Context, Result};
-use rand::Rng;
 use std::fs;
 use std::path::Path;
 use std::process::Stdio;
@@ -311,18 +310,16 @@ fn find_validator_dir(start: &Path) -> Result<std::path::PathBuf> {
 
 /// Generate a hex string of the given length.
 fn generate_hex(len: usize) -> String {
-    let mut rng = rand::thread_rng();
     (0..len)
-        .map(|_| format!("{:x}", rng.gen::<u8>() % 16))
+        .map(|_| format!("{:x}", rand::random::<u8>() % 16))
         .collect()
 }
 
 /// Generate a random password using alphanumeric characters.
 fn generate_password(len: usize) -> String {
-    let mut rng = rand::thread_rng();
     (0..len)
         .map(|_| {
-            let idx = rng.gen_range(0..PASSWORD_CHARS.len());
+            let idx = rand::random_range(0..PASSWORD_CHARS.len());
             PASSWORD_CHARS[idx] as char
         })
         .collect()
