@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.11
+
 - **Bench plans write `accessControl` instead of `accessPolicy`.** The validator
   (0.9.0 and later) reads any `<Base>Policy` metaType as the access policy of
   `<Base>`, owned by whoever first wrote `<Base>`; the bench never writes
