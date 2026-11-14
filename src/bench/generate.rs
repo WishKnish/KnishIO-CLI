@@ -1455,4 +1455,14 @@ mod tests {
         assert!(ids[0].ends_with("-1"), "{}", ids[0]);
         assert!(ids[1].ends_with("-2"), "{}", ids[1]);
     }
+
+    /// The validator reads a `<Base>Policy` metaType as the access policy of `<Base>`,
+    /// owned by the base entity's first writer; the bench never writes the base, so it
+    /// would own nothing and every write to such a type is refused.
+    #[test]
+    fn bench_types_are_not_policy_types() {
+        for t in BENCH_META_TYPES.iter().chain(BENCH_RULE_TARGETS) {
+            assert!(!t.to_ascii_lowercase().ends_with("policy"), "{t} is a policy metaType");
+        }
+    }
 }

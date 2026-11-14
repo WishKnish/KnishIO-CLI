@@ -32,7 +32,7 @@ pub const BENCH_META_TYPES: &[&str] = &[
     "userProfile",
     "assetMetadata",
     "deviceTelemetry",
-    "accessPolicy",
+    "accessControl",
     "contentIndex",
 ];
 
@@ -40,7 +40,7 @@ pub const BENCH_META_TYPES: &[&str] = &[
 pub const BENCH_RULE_TARGETS: &[&str] = &[
     "userProfile",
     "assetMetadata",
-    "accessPolicy",
+    "accessControl",
 ];
 
 /// Number of distinct metaIds per metaType for realistic DAG branching.
