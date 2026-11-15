@@ -1359,9 +1359,9 @@ dependencies = [
 
 [[package]]
 name = "knishio-client"
-version = "2.3.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09634b8ae03853986c291f9aedc5cca49648ac8878a7e156bb5f3823334f0afd"
+checksum = "054d9596eb2e9ae0b042a77e4c7c30b8778050ca75be577d5ab5d4f070ff29e4"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1372,6 +1372,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "indexmap",
  "libcrux-ml-kem",
  "num-bigint 0.5.1",
  "num-traits",

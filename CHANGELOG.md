@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **knishio-client 2.3.1** (was 2.3.0). The bench and every command that signs
+  build their molecules with the SDK's 2.3.1 construction (metas, policies and
+  token-unit metas in JS key order); the CLI's own commands and options are
+  unchanged.
+
 ## 0.2.11
 
 - **Bench plans write `accessControl` instead of `accessPolicy`.** The validator

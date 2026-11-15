@@ -48,7 +48,7 @@ indicatif = "0.18"
 # `{ path = "../../sdks/KnishIO-Client-Rust" }` ONLY while testing an
 # unpublished SDK change, then revert before shipping. Guard lives in
 # servers/knishio-validator-rust/Makefile → `check-no-path-dep`.
-knishio-client = "2.3.0"
+knishio-client = "2.3.1"
 
 # SQLite for benchmark fixture storage
 rusqlite = { version = "0.41", features = ["bundled"] }
