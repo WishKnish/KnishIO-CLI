@@ -6,6 +6,13 @@
   build their molecules with the SDK's 2.3.1 construction (metas, policies and
   token-unit metas in JS key order); the CLI's own commands and options are
   unchanged.
+- **Tag-triggered publish (`.github/workflows/publish.yml`).** Pushing a bare
+  version tag runs a version gate (`.github/scripts/check-version.sh`: the tag,
+  Cargo.toml and the lock's own entry must agree), clippy and the tests, then
+  `cargo publish --locked` through crates.io Trusted Publishing (no stored
+  token) and a GitHub Release whose body is the tag's CHANGELOG section. A
+  `workflow_dispatch` run with a `tag` input is a dry run and publishes nothing.
+  CI runs the same version gate on every push.
 
 ## 0.2.11
 

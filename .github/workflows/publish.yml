@@ -1,0 +1,133 @@
+# knishio-cli publish — tag-driven crates.io publish via Trusted Publishing / OIDC.
+# Push a bare semver tag (e.g. `0.2.12`) → version/clippy/test gate → `cargo publish --locked`.
+# Same shape as the Rust SDK's publish.yml, minus its SBOM job (this repo has no SBOM script).
+#
+# Auth = crates.io Trusted Publishing (OIDC) — NO long-lived CARGO_REGISTRY_TOKEN.
+# rust-lang/crates-io-auth-action exchanges the GitHub id-token for a short-lived crates.io token.
+# One-time maintainer setup before the first tag:
+#   - crates.io → the `knishio-cli` crate → Settings → Trusted Publishing → add GitHub Actions:
+#     owner `WishKnish`, repository `KnishIO-CLI`, workflow `publish.yml`, environment `release`.
+#     (Earlier releases were published manually, which trusted publishing requires.)
+#   - GitHub → this repository → Settings → Environments → `release`, deployment tags `[0-9]*`.
+name: Publish
+
+on:
+  push:
+    tags:
+      - '[0-9]*'
+  # Dry run. This workflow is otherwise reachable only by pushing a tag, which publishes —
+  # so every change to it (the version gate, an action bump) would ship unexercised. A
+  # dispatch runs the gate and the full build/test path and stops before anything leaves the
+  # runner, because the publish job is guarded on `github.event_name == 'push'`.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version to dry-run the gate against, e.g. 0.2.12. Publishes NOTHING.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Split out of the publish job on purpose: `environment: release` is a deployment gate that
+  # can require approval, and a dry run that uploads nothing should not have to pass it.
+  verify:
+    name: verify version + lint + test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # persist-credentials: false — nothing here pushes; the Release uses GITHUB_TOKEN, not git config.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Refuse to publish a tag that Cargo.toml and Cargo.lock do not themselves claim.
+      # Shared definition with CI and with local runs — see .github/scripts/check-version.sh.
+      - name: Verify tag matches the declared CLI version
+        id: version
+        # DISPATCH_TAG arrives via env, never interpolated into the shell text — a
+        # workflow_dispatch input is attacker-controllable text and `${{ }}` inside `run:`
+        # is substituted before bash ever sees it (workflow-injection hygiene).
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            EXPECTED="${GITHUB_REF#refs/tags/}"
+          else
+            EXPECTED="$DISPATCH_TAG"
+          fi
+          bash .github/scripts/check-version.sh "$EXPECTED"
+
+      - name: Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
+        with:
+          components: clippy
+
+      # Gate — never publish a tag that doesn't lint/build/test clean (same commands as ci.yml).
+      - name: cargo clippy (lint gate)
+        run: cargo clippy --all-targets
+
+      - name: cargo test
+        run: cargo test --locked
+
+  publish:
+    name: publish to crates.io (Trusted Publishing)
+    needs: [verify]
+    if: github.event_name == 'push'   # dispatch = dry run; never publishes
+    runs-on: ubuntu-latest
+    environment: release   # matches the crates.io trusted-publisher Environment + the repo's `release` env
+    permissions:
+      id-token: write   # OIDC for crates.io Trusted Publishing
+      contents: write   # create the GitHub Release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Release body = this tag's CHANGELOG.md section, NOT generate_release_notes (which lists
+      # merged pull requests; releases here land as direct pushes, so it would advertise little
+      # more than dependabot bumps). The curated CHANGELOG entry is the source of truth.
+      #
+      # This runs BEFORE `cargo publish` on purpose: the empty-section guard is only useful if
+      # it aborts ahead of the irreversible upload. Extraction needs nothing but the checkout.
+      - name: Extract this tag's CHANGELOG section
+        env:
+          TAG_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          # This CHANGELOG uses bare headings (`## 0.2.11`). Match the whole line, so `## 0.2.1`
+          # never matches `## 0.2.11`; print up to (not including) the next `## ` heading.
+          awk -v ver="## $TAG_VERSION" '
+            $0 == ver { inside = 1; print; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "::error file=CHANGELOG.md::No '## $TAG_VERSION' section found — refusing to publish with empty release notes."
+            exit 1
+          fi
+          echo "Release notes for $TAG_VERSION:"
+          cat /tmp/release-notes.md
+
+      # OIDC: exchange the GitHub id-token for a short-lived crates.io token (no stored secret).
+      - name: Authenticate to crates.io (Trusted Publishing)
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9  # v1
+        id: auth
+
+      # cargo publish re-verifies the package builds from the packaged sources before upload;
+      # --locked packages and builds with the committed Cargo.lock.
+      - name: Publish to crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3
+        with:
+          # `generate_release_notes` stays OFF, deliberately: the action would append the whole
+          # generated "What's Changed" block below the CHANGELOG body.
+          body_path: /tmp/release-notes.md
