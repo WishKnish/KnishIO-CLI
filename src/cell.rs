@@ -194,12 +194,18 @@ pub async fn purge(t: &crate::psql::PsqlTransport, slug: &str) -> Result<()> {
     }
 
     let escaped = slug.replace('\'', "''");
+    // Inside the single-quoted DO body every quote is doubled once more.
+    let escaped_body = escaped.replace('\'', "''");
     // Disable the cascade_before_molecule_delete trigger to avoid
     // "tuple already modified" errors during bulk cell purge.
     // Bond migration (osmosis) is pointless when deleting the entire cell.
+    // Osmosis tombstones of the cell and the meta rows of its pruned
+    // molecules are removed too (skipped when the validator has no
+    // osmosis_tombstones table; the DO body avoids `$` for remote shells).
     let sql = format!(
         "BEGIN; \
          DELETE FROM metas WHERE molecular_hash IN (SELECT molecular_hash FROM molecules WHERE cell_slug = '{escaped}'); \
+         DO 'BEGIN IF to_regclass(''osmosis_tombstones'') IS NOT NULL THEN DELETE FROM metas WHERE molecular_hash IN (SELECT molecular_hash FROM osmosis_tombstones WHERE cell_slug = ''{escaped_body}''); DELETE FROM osmosis_tombstones WHERE cell_slug = ''{escaped_body}''; END IF; END'; \
          DELETE FROM audit_events WHERE cell_slug = '{escaped}'; \
          DELETE FROM user_activity WHERE cell_slug = '{escaped}'; \
          DELETE FROM active_sessions WHERE cell_slug = '{escaped}'; \

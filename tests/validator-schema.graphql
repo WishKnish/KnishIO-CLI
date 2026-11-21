@@ -2150,10 +2150,10 @@ type Wallet {
 	"""
 	Metadata associated with this wallet (WP-016 Slice 3 — ActiveWallet `metas`).
 	Wallet metas are keyed by `metas.meta_id = wallet.address` (per the PHP
-	server, authoritative); `position` comes from the `atoms` table (the
-	`metas` table has no position column), correlated by molecular_hash +
-	meta_id so each meta yields a single position. Shadow wallets (address
-	NULL) have no metas.
+	server, authoritative); `position` is the position of the atom that wrote the
+	meta (correlated by molecular_hash + meta_id), kept in `metas.meta_atom_position`
+	when Osmosis prunes the writing molecule. Shadow wallets (address NULL) have no
+	metas.
 	"""
 	metas: [WalletMeta!]!
 }
@@ -2191,9 +2191,9 @@ type WalletBundle {
 	"""
 	Get metadata associated with this wallet bundle.
 	SDK selects: molecularHash, position, key, value, createdAt.
-	`position` is NOT a column on `metas` — it comes from the `atoms` table
-	(correlated by molecular_hash + meta_id, mirroring `Wallet.metas`). A prior
-	`SELECT position FROM metas` errored at runtime (no such column).
+	`position` is the position of the atom that wrote the meta (correlated by
+	molecular_hash + meta_id, mirroring `Wallet.metas`), kept in
+	`metas.meta_atom_position` when Osmosis prunes the writing molecule.
 	"""
 	metas: [MetaItemSDK!]!
 }
